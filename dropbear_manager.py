@@ -40,12 +40,35 @@ WantedBy=multi-user.target
 
 def menu() -> None:
     while True:
-        print("\n=== Dropbear SSH ===\n1. Install on TCP/109 and TCP/143\n2. List shared SSH accounts\n0. Return")
+        print("\n=== DROPBEAR ACCOUNT MANAGER ===")
+        print("[01] Install service                  [06] Create trial account")
+        print("[02] Create account                   [07] List accounts")
+        print("[03] Renew account                    [08] Show connected sessions")
+        print("[04] Delete account                   [09] Account details")
+        print("[05] Service status                   [00] Return")
         choice = input("Select: ").strip()
         try:
             if choice == "0": return
             if choice == "1": install()
-            elif choice == "2": print("Accounts:", ", ".join(services_manager.ssh_list()) or "none")
+            elif choice == "5":
+                result = subprocess.run(["systemctl", "is-active", "kennet-dropbear.service"], capture_output=True, text=True)
+                print("Dropbear:", result.stdout.strip() or "inactive", "(TCP/109, TCP/143)")
+            elif choice in {"2", "6"}:
+                trial = choice == "6"
+                username = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
+                password = services_manager.ssh_add(username, days, trial=trial)
+                print(f"Username: {username}\nPassword (shown once): {password}")
+            elif choice == "3":
+                username=input("Username: ").strip(); days=int(input("Extend validity by days [30]: ").strip() or "30")
+                services_manager.ssh_renew(username,days); print("Account renewed.")
+            elif choice == "4":
+                username=input("Username: ").strip()
+                if input(f"Delete {username}? Type YES: ").strip()=="YES": services_manager.ssh_remove(username)
+            elif choice == "7": print("Accounts:", ", ".join(services_manager.ssh_list()) or "none")
+            elif choice == "8": print("Connected sessions:", services_manager.active_connections("ssh"))
+            elif choice == "9":
+                name=input("Username: ").strip(); print(services_manager.account_details("ssh",name))
             else: print("Invalid selection")
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"Operation failed: {exc}")

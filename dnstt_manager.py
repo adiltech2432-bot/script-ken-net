@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 
 ETC = Path("/etc/kennet-panel")
@@ -211,11 +212,13 @@ def _next_port(routes: dict) -> int:
     return next((port for port in range(5301, 65000) if port not in used), 0)
 
 
-def add_account(username: str, local_port: int = 7000) -> tuple[Path, str]:
+def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial: bool = False) -> tuple[Path, str]:
     if not NAME_RE.fullmatch(username):
         raise ValueError("Username must contain 3-32 letters, digits, or underscores")
     if not 1 <= int(local_port) <= 65535:
         raise ValueError("Client local port must be in 1..65535")
+    if not 1 <= int(days) <= 3650:
+        raise ValueError("Validity must be between 1 and 3650 days")
     config = _configuration()
     domain = f"{username.lower()}.{config['base_domain']}"
     if not DOMAIN_RE.fullmatch(domain):
@@ -269,7 +272,9 @@ def add_account(username: str, local_port: int = 7000) -> tuple[Path, str]:
         _run(["systemctl", "restart", MUX_UNIT])
         accounts[username] = {"domain": domain, "port": port, "service": service_name,
                               "service_user": service_user,
-                              "key_dir": str(account_dir), "local_port": int(local_port)}
+                              "key_dir": str(account_dir), "local_port": int(local_port),
+                              "expires_at": (date.today() + timedelta(days=int(days))).isoformat(),
+                              "trial": trial}
         _atomic(ACCOUNTS, json.dumps(accounts, indent=2) + "\n")
     except Exception:
         route_map.pop(domain, None)
@@ -299,6 +304,8 @@ def add_account(username: str, local_port: int = 7000) -> tuple[Path, str]:
         f"dnstt-client -doh {config['doh_url']} -pubkey-file server.pub {domain} 127.0.0.1:{local_port}\n"
     )
     _atomic(profile, text, 0o600)
+    import services_manager
+    services_manager.install_expiry_timer()
     records = (
         f"DNS records to add for {domain}:\n"
         f"  NS  {domain}.  -> {config['nameserver_host']}.\n"
@@ -306,6 +313,38 @@ def add_account(username: str, local_port: int = 7000) -> tuple[Path, str]:
         "The nameserver must be authoritative for the delegated account zone and UDP/53 must reach the router.\n"
     )
     return profile, records
+
+
+def list_accounts() -> dict:
+    return _read_json(ACCOUNTS, {})
+
+
+def account_details(username: str) -> dict:
+    accounts = list_accounts()
+    if username not in accounts:
+        raise ValueError("DNSTT account not found")
+    return dict(accounts[username])
+
+
+def renew_account(username: str, days: int) -> None:
+    if not NAME_RE.fullmatch(username) or not 1 <= int(days) <= 3650:
+        raise ValueError("Invalid username or validity period")
+    accounts = list_accounts()
+    if username not in accounts:
+        raise ValueError("DNSTT account not found")
+    accounts[username]["expires_at"] = (date.today() + timedelta(days=int(days))).isoformat()
+    accounts[username]["trial"] = False
+    _atomic(ACCOUNTS, json.dumps(accounts, indent=2) + "\n")
+
+
+def purge_expired(today: date | None = None) -> list[str]:
+    today = today or date.today()
+    accounts = list_accounts()
+    expired = [name for name, record in accounts.items()
+               if record.get("expires_at") and date.fromisoformat(record["expires_at"]) < today]
+    for name in expired:
+        remove_account(name)
+    return expired
 
 
 def remove_account(username: str) -> None:
@@ -342,41 +381,61 @@ def remove_account(username: str) -> None:
 def menu() -> None:
     while True:
         print("\nDNSTT — a separate domain and service for each name (DNSTT does not authenticate clients)")
-        print("1. Build the official DNSTT tools")
-        print("2. Configure the domain and DNSTT server")
-        print("3. Install the multi-domain DNS router")
-        print("4. Create an account/tunnel")
-        print("5. Revoke and remove an account/tunnel")
-        print("0. Return")
+        print("[01] Install tools / router           [06] Delete endpoint")
+        print("[02] Configure DNS domain             [07] Create trial endpoint")
+        print("[03] Router status                    [08] List endpoints")
+        print("[04] Create endpoint                  [09] Endpoint status")
+        print("[05] Renew endpoint                   [10] Endpoint details")
+        print("[00] Return")
         choice = input("Select: ").strip()
         try:
-            if choice == "0":
+            if choice in {"0", "00"}:
                 return
             if choice == "1":
                 if install_tools():
                     print("Installed dnstt-server and dnstt-client in /usr/local/bin")
+                if input("Install the DNSTT DNS router now? Type YES: ").strip() == "YES":
+                    install_router()
+                    print("DNS router installed.")
             elif choice == "2":
                 configure()
                 print(f"Configuration saved: {CONFIG}")
             elif choice == "3":
-                if input("The DNS router will start. Make sure the selected port is available. Type YES to continue: ").strip() == "YES":
-                    install_router()
-                    print("DNS router installed.")
-            elif choice == "4":
-                username = input("Username: ").strip()
+                result = subprocess.run(["systemctl", "is-active", MUX_UNIT], capture_output=True, text=True)
+                print("DNSTT router:", result.stdout.strip() or "inactive")
+            elif choice in {"4", "7"}:
+                trial = choice == "7"
+                username = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 try:
                     port = int(input("Local client port [7000]: ").strip() or "7000")
                 except ValueError:
                     print("Invalid port")
                     continue
-                profile, records = add_account(username, port)
-                print(f"Profile created: {profile}\n{records}")
+                profile, records = add_account(username, port, days, trial=trial)
+                print(f"Profile created: {profile}\nExpires: {(date.today() + timedelta(days=days)).isoformat()}\n{records}")
                 print("The account directory contains the server private key; do not share it with the client.")
             elif choice == "5":
                 username = input("Username: ").strip()
-                if input(f"Endpoint {username} will be stopped for everyone using its details. Type YES: ").strip() == "YES":
+                days = int(input("Extend validity by days [30]: ").strip() or "30")
+                renew_account(username, days)
+                print("Endpoint renewed.")
+            elif choice == "6":
+                username = input("Username: ").strip()
+                if input(f"Endpoint {username} will stop for everyone using it. Type YES: ").strip() == "YES":
                     remove_account(username)
                     print("Tunnel stopped; key and service removed.")
+            elif choice == "8":
+                purge_expired()
+                for username, record in sorted(list_accounts().items()):
+                    print(f"- {username} | {record['domain']} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+            elif choice == "9":
+                for username, record in sorted(list_accounts().items()):
+                    result = subprocess.run(["systemctl", "is-active", record["service"]], capture_output=True, text=True)
+                    print(f"- {username}: service {result.stdout.strip() or 'inactive'} (DNSTT cannot count authenticated users)")
+            elif choice == "10":
+                username = input("Username: ").strip()
+                print(json.dumps(account_details(username), indent=2))
             else:
                 print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:

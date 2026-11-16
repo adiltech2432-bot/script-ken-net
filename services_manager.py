@@ -13,6 +13,7 @@ import secrets
 import shutil
 import string
 import subprocess
+import socket
 import tempfile
 import uuid
 from pathlib import Path
@@ -50,14 +51,16 @@ def state() -> dict:
     return json.loads(STATE.read_text()) if STATE.exists() else {"domain": "", "accounts": {}}
 
 
-def set_domain(domain: str) -> None:
+def set_domain(domain: str, *, issue_certificate: bool = True) -> None:
     domain = domain.strip().lower().rstrip(".")
     if not DOMAIN_RE.fullmatch(domain):
         raise ValueError("Enter a fully qualified domain name, e.g. vpn.example.com")
     data = state()
     data["domain"] = domain
     _atomic(STATE, json.dumps(data, indent=2) + "\n")
-    print(f"Domain saved: {domain}. Point its A/AAAA record to this VPS public IP.")
+    print(f"Domain saved: {domain}. Checking DNS and requesting its TLS certificate.")
+    if issue_certificate:
+        acquire_tls_certificate(domain)
 
 
 def open_ports(ports: list[tuple[str, int]]) -> None:
@@ -95,7 +98,7 @@ def install_ssh() -> None:
     open_ports([("tcp", 22)])
 
 
-def ssh_add(username: str, days: int) -> str:
+def ssh_add(username: str, days: int, *, trial: bool = False) -> str:
     if not NAME_RE.fullmatch(username) or not 1 <= days <= 3650:
         raise ValueError("Use a 3-32 character username and expiry from 1 to 3650 days")
     if subprocess.run(["id", "-u", username], capture_output=True).returncode == 0:
@@ -108,6 +111,10 @@ def ssh_add(username: str, days: int) -> str:
     except Exception:
         subprocess.run(["userdel", "-r", username], capture_output=True)
         raise
+    data = state()
+    data["accounts"][username] = {"protocol": "ssh", "expires_at": (dt.date.today() + dt.timedelta(days=days)).isoformat(), "trial": trial}
+    _atomic(STATE, json.dumps(data, indent=2) + "\n")
+    install_expiry_timer()
     return password
 
 
@@ -129,6 +136,108 @@ def ssh_renew(username: str, days: int) -> None:
     if not 1 <= days <= 3650: raise ValueError("Validity must be from 1 to 3650 days")
     expiry=(dt.date.today()+dt.timedelta(days=days)).isoformat()
     _run(["chage","-E",expiry,username])
+    data=state(); data["accounts"][username]["expires_at"]=expiry; data["accounts"][username]["trial"]=False
+    _atomic(STATE,json.dumps(data,indent=2)+"\n")
+
+
+def install_expiry_timer() -> None:
+    service = """[Unit]
+Description=Expire Kennet managed accounts
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/kennet-panel/services_manager.py --expire
+"""
+    timer = """[Unit]
+Description=Periodic Kennet account expiry check
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+[Install]
+WantedBy=timers.target
+"""
+    _atomic(Path("/etc/systemd/system/kennet-account-expiry.service"), service, 0o644)
+    _atomic(Path("/etc/systemd/system/kennet-account-expiry.timer"), timer, 0o644)
+    _run(["systemctl", "daemon-reload"])
+    _run(["systemctl", "enable", "--now", "kennet-account-expiry.timer"])
+
+
+def purge_expired(today: dt.date | None = None) -> list[str]:
+    today = today or dt.date.today()
+    data = state()
+    expired = []
+    xray_expired = []
+    for username, record in list(data.get("accounts", {}).items()):
+        value = record.get("expires_at")
+        if not value:
+            continue
+        try:
+            is_expired = dt.date.fromisoformat(value) < today
+        except ValueError:
+            continue
+        if not is_expired:
+            continue
+        if record.get("protocol") == "ssh":
+            subprocess.run(["userdel", "-r", username], capture_output=True, check=False)
+        elif record.get("protocol") in XRAY_PORTS:
+            xray_expired.append((username, record["protocol"]))
+        else:
+            continue
+        expired.append(username)
+    if xray_expired:
+        cfg = get_xray_config()
+        expired_tags = {f"kennet-{protocol}-{username}" for username, protocol in xray_expired}
+        cfg["inbounds"] = [item for item in cfg.get("inbounds", []) if item.get("tag") not in expired_tags]
+        _write_xray(cfg)
+    for username in expired:
+        data["accounts"].pop(username, None)
+    if expired:
+        _atomic(STATE, json.dumps(data, indent=2) + "\n")
+    try:
+        import wireguard_manager
+        expired.extend("wireguard:" + name for name in wireguard_manager.purge_expired(today))
+    except (ImportError, FileNotFoundError, RuntimeError, ValueError):
+        pass
+    try:
+        import dnstt_manager
+        expired.extend("dnstt:" + name for name in dnstt_manager.purge_expired(today))
+    except (ImportError, FileNotFoundError, RuntimeError, ValueError):
+        pass
+    return expired
+
+
+def account_details(protocol: str, username: str) -> dict:
+    record = state().get("accounts", {}).get(username)
+    if not record or record.get("protocol") != protocol:
+        raise ValueError("Managed account not found")
+    return {"username": username, **record}
+
+
+def active_connections(protocol: str) -> dict[str, int]:
+    if protocol == "ssh":
+        result = subprocess.run(["who"], capture_output=True, text=True, check=False)
+        counts: dict[str, int] = {}
+        managed = set(ssh_list())
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0] in managed:
+                counts[parts[0]] = counts.get(parts[0], 0) + 1
+        return counts
+    if protocol in XRAY_PORTS:
+        port = XRAY_PORTS[protocol]
+        result = subprocess.run(["ss", "-Htn", "state", "established", "sport", "=", f":{port}"], capture_output=True, text=True, check=False)
+        return {"active connections (not unique users)": len(result.stdout.splitlines())}
+    raise ValueError(f"Connection counting is not implemented for {protocol}")
+
+
+def xray_renew(protocol: str, username: str, days: int) -> None:
+    if protocol not in XRAY_PORTS or not 1 <= int(days) <= 3650:
+        raise ValueError("Invalid protocol or validity period")
+    record = account_details(protocol, username)
+    record["expires_at"] = (dt.date.today() + dt.timedelta(days=days)).isoformat()
+    record["trial"] = False
+    data = state(); data["accounts"][username] = {k:v for k,v in record.items() if k != "username"}
+    _atomic(STATE, json.dumps(data, indent=2) + "\n")
 
 
 def xray_install() -> None:
@@ -167,9 +276,11 @@ def _write_xray(cfg: dict) -> None:
         raise
 
 
-def xray_add(protocol: str, username: str) -> str:
+def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = False) -> str:
     if protocol not in XRAY_PORTS or not NAME_RE.fullmatch(username):
         raise ValueError("Invalid protocol or username")
+    if not 1 <= int(days) <= 3650:
+        raise ValueError("Validity must be between 1 and 3650 days")
     data = state(); domain = data.get("domain", "")
     if not DOMAIN_RE.fullmatch(domain):
         raise ValueError("Configure the TLS domain before creating Xray accounts")
@@ -195,8 +306,10 @@ def xray_add(protocol: str, username: str) -> str:
     cfg.setdefault("inbounds", []).append({"tag": f"kennet-{protocol}-{username}", "listen":"0.0.0.0", "port":port,
         "protocol":protocol,"settings":settings,"streamSettings":{"network":network,"security":security,"tlsSettings":tls}})
     _write_xray(cfg)
-    data["accounts"][username] = {"protocol":protocol,"credential":credential,"port":port}
+    expires = (dt.date.today() + dt.timedelta(days=days)).isoformat()
+    data["accounts"][username] = {"protocol":protocol,"credential":credential,"port":port,"expires_at":expires,"trial":trial}
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
+    install_expiry_timer()
     open_ports([("tcp",port)])
     return credential
 
@@ -228,11 +341,27 @@ def client_link(protocol: str, username: str, credential: str, domain: str) -> s
 def configure_tls() -> None:
     data=state(); domain=data.get("domain", "")
     if not DOMAIN_RE.fullmatch(domain): raise ValueError("Set the domain first")
-    email=input("Email address for Let's Encrypt expiry notices: ").strip()
-    if not email or "@" not in email: raise ValueError("A valid email address is required")
+    acquire_tls_certificate(domain)
+
+
+def acquire_tls_certificate(domain: str) -> None:
+    try:
+        addresses = sorted({item[4][0] for item in socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)})
+    except OSError as exc:
+        raise ValueError(f"DNS lookup failed for {domain}; add an A/AAAA record pointing to this VPS first") from exc
+    if not addresses:
+        raise ValueError(f"No A/AAAA DNS records found for {domain}")
+    public_ip = ""
+    if shutil.which("curl"):
+        public_ip = subprocess.run(["curl", "-4fsS", "--max-time", "8", "https://api.ipify.org"], capture_output=True, text=True, check=False).stdout.strip()
+    if public_ip and public_ip not in addresses:
+        print(f"Warning: {domain} resolves to {', '.join(addresses)}, while this VPS reports {public_ip}. Certificate validation may fail unless a DNS proxy forwards HTTP/80 here.")
+    listener = subprocess.run(["ss", "-Hltn", "sport", "=", ":80"], capture_output=True, text=True, check=False)
+    if listener.stdout.strip():
+        raise RuntimeError("TCP/80 is already occupied; stop or reconfigure its service before standalone certificate issuance")
     open_ports([("tcp",80)])
     _run(["apt-get","update"]); _run(["apt-get","install","-y","certbot"])
-    _run(["certbot","certonly","--standalone","--non-interactive","--agree-tos","--email",email,"-d",domain])
+    _run(["certbot","certonly","--standalone","--non-interactive","--agree-tos","--register-unsafely-without-email","--preferred-challenges","http","-d",domain])
     if shutil.which("getent") and subprocess.run(["getent", "group", "ssl-cert"], capture_output=True).returncode == 0:
         subprocess.run(["usermod", "-a", "-G", "ssl-cert", "nobody"], check=True)
         archive = Path(f"/etc/letsencrypt/archive/{domain}")
@@ -244,10 +373,13 @@ def configure_tls() -> None:
         _atomic(Path("/etc/letsencrypt/renewal-hooks/deploy/kennet-xray-tls.sh"), hook, 0o755)
         _run(["systemctl", "daemon-reload"])
         subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
-    print(f"TLS certificate installed for {domain}. Ensure DNS points here and TCP/80 is reachable for renewal.")
+    print(f"TLS certificate installed for {domain}. DNS addresses: {', '.join(addresses)}. TCP/80 must remain reachable for renewal.")
 
 
 def menu(protocol: str) -> None:
+    if protocol in {"ssh", "vless", "vmess", "trojan"}:
+        account_menu(protocol)
+        return
     while True:
         print(f"\n=== {protocol.upper()} account manager ===")
         if protocol == "tls":
@@ -287,11 +419,96 @@ def menu(protocol: str) -> None:
             elif protocol in {"vless","vmess","trojan"} and choice=="5": print("Accounts:", ", ".join(xray_list(protocol)) or "none")
             elif protocol in {"vless","vmess","trojan"} and choice=="6": xray_remove(protocol,input("Username: ").strip())
             elif protocol=="ssh" and choice=="3":
-                username=input("Username: ").strip(); days=int(input("Validity in days: ")); pwd=ssh_add(username,days); d=state(); d["accounts"][username]={"protocol":"ssh"}; _atomic(STATE,json.dumps(d,indent=2)+"\n"); print(f"Password (shown once): {pwd}")
+                username=input("Username: ").strip(); days=int(input("Validity in days: ")); pwd=ssh_add(username,days); print(f"Password (shown once): {pwd}")
             elif protocol=="ssh" and choice=="4": print("Accounts:", ", ".join(ssh_list()) or "none")
             elif protocol=="ssh" and choice=="5": ssh_remove(input("Username: ").strip())
             elif protocol=="ssh" and choice=="6":
                 username=input("Username: ").strip(); days=int(input("Extend validity by days: ")); ssh_renew(username,days)
             else: print("Invalid selection")
         except (OSError,ValueError,RuntimeError,json.JSONDecodeError,subprocess.CalledProcessError) as exc: print(f"Operation failed: {exc}")
+
+
+def account_menu(protocol: str) -> None:
+    titles = {"ssh": "SSH VIP", "vless": "VLESS", "vmess": "VMESS", "trojan": "TROJAN"}
+    title = titles[protocol]
+    while True:
+        print(f"\n=== {title} ACCOUNT MANAGER ===")
+        print("[01] Install / configure service       [06] Create trial account")
+        print("[02] Create account                   [07] List accounts")
+        print("[03] Renew account                    [08] Show connected sessions")
+        print("[04] Delete account                   [09] Set domain / TLS certificate")
+        print("[05] Show account details              [00] Return")
+        choice = input("Select option [00-09]: ").strip()
+        try:
+            if choice in {"0", "00"}:
+                return
+            if choice == "1":
+                if protocol == "ssh": install_ssh()
+                else: xray_install()
+            elif choice == "9":
+                if protocol == "ssh":
+                    print("A domain is optional for standard SSH. Use the TLS / Domain menu for TLS setup.")
+                else:
+                    current = state().get("domain", "")
+                    value = input(f"Domain name [{current}]: ").strip() or current
+                    set_domain(value)
+            elif choice in {"2", "6"}:
+                trial = choice == "6"
+                username = ("trial" + secrets.token_hex(3)) if trial else input("Username: ").strip()
+                days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
+                if protocol == "ssh":
+                    password = ssh_add(username, days, trial=trial)
+                    print(f"Account: {username}\nPassword (shown once): {password}\nExpires: {(dt.date.today()+dt.timedelta(days=days)).isoformat()}")
+                else:
+                    credential = xray_add(protocol, username, days, trial=trial)
+                    print(f"Account: {username}\nExpires: {(dt.date.today()+dt.timedelta(days=days)).isoformat()}")
+                    print(client_link(protocol, username, credential, state().get("domain", "")))
+            elif choice == "3":
+                username = input("Username: ").strip()
+                days = int(input("Extend validity by days [30]: ").strip() or "30")
+                if protocol == "ssh": ssh_renew(username, days)
+                else: xray_renew(protocol, username, days)
+                print("Account renewed.")
+            elif choice == "4":
+                username = input("Username: ").strip()
+                if input(f"Delete {username} and revoke its access? Type YES: ").strip() == "YES":
+                    if protocol == "ssh": ssh_remove(username)
+                    else: xray_remove(protocol, username)
+                    print("Account deleted.")
+            elif choice == "5":
+                username = input("Username: ").strip()
+                record = account_details(protocol, username)
+                print(json.dumps(record, indent=2))
+                if protocol != "ssh":
+                    print(client_link(protocol, username, record["credential"], state().get("domain", "")))
+                else:
+                    print("SSH password is not stored in recoverable form; reset it by renewing/recreating the account.")
+            elif choice == "7":
+                purge_expired()
+                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
+                print(f"{title} accounts ({len(names)}):")
+                for username in names:
+                    record = account_details(protocol, username)
+                    print(f"- {username} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+            elif choice == "8":
+                sessions = active_connections(protocol)
+                print("Connected sessions:")
+                for username, count in sessions.items(): print(f"- {username}: {count}")
+                if not sessions: print("- none detected")
+            else:
+                print("Invalid selection.")
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+            print(f"Operation failed: {exc}")
+
+
+def _expire_cli() -> int:
+    expired = purge_expired()
+    print("Expired accounts removed: " + (", ".join(expired) if expired else "none"))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] == ["--expire"]:
+        raise SystemExit(_expire_cli())
 

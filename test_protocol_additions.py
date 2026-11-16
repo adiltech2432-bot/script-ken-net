@@ -1,5 +1,9 @@
 import asyncio
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import dnstt_manager
 import dnstt_mux
@@ -40,6 +44,16 @@ class WireGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             wireguard_manager.render_server_config("wg0;touch", "10.44.0.1/24", 51820, "private", "eth0")
 
+    def test_peer_renewal_updates_expiry_and_clears_trial_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "peers.json").write_text(json.dumps({"alice": {"trial": True}}))
+            with patch.object(wireguard_manager, "ROOT", root):
+                wireguard_manager.renew_peer("alice", 14)
+                saved = wireguard_manager.list_peers()["alice"]
+        self.assertFalse(saved["trial"])
+        self.assertTrue(saved["expires_at"])
+
 
 class DnsttTests(unittest.TestCase):
     def test_routes_dns_question_to_most_specific_domain(self):
@@ -62,6 +76,16 @@ class DnsttTests(unittest.TestCase):
     def test_accounts_use_dns_safe_names(self):
         self.assertIsNone(dnstt_manager.NAME_RE.fullmatch("client_one"))
         self.assertIsNotNone(dnstt_manager.NAME_RE.fullmatch("client-one"))
+
+    def test_endpoint_renewal_updates_expiry_and_clears_trial_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accounts = Path(directory) / "accounts.json"
+            accounts.write_text(json.dumps({"alice": {"trial": True}}))
+            with patch.object(dnstt_manager, "ACCOUNTS", accounts):
+                dnstt_manager.renew_account("alice", 14)
+                saved = dnstt_manager.account_details("alice")
+        self.assertFalse(saved["trial"])
+        self.assertTrue(saved["expires_at"])
 
 
 class _EchoDns(asyncio.DatagramProtocol):

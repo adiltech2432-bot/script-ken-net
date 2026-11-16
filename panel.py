@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,107 @@ PROTOCOLS = (
     Protocol("slowdns", "SlowDNS", "server", note="No SlowDNS-compatible service is configured on this VPS."),
     Protocol("dnstt", "DNSTT", "server", note="Configure the DNSTT tools, delegated domain, DNS router, and endpoint first."),
 )
+
+ACCOUNT_KEYS = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
+
+
+def _managed_accounts():
+    try:
+        data = json.loads(Path("/etc/kennet-panel/services.json").read_text())
+        return data.get("accounts", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def _system_metrics() -> tuple[str, str, str]:
+    cpu = "n/a"
+    try:
+        loads = os.getloadavg()
+        cpu = f"load {loads[0]:.2f}"
+    except (AttributeError, OSError):
+        pass
+    ram = "n/a"
+    try:
+        mem = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1); mem[key] = int(value.strip().split()[0])
+        total = mem["MemTotal"]; used = total - mem.get("MemAvailable", total)
+        ram = f"RAM {used * 100 // total}%"
+    except (OSError, KeyError, ValueError):
+        pass
+    disk = "n/a"
+    try:
+        usage = shutil.disk_usage("/"); disk = f"DISK {usage.used * 100 // usage.total}%"
+    except OSError:
+        pass
+    uptime = "n/a"
+    try:
+        seconds = int(float(Path("/proc/uptime").read_text().split()[0])); days, rem = divmod(seconds, 86400); hours, rem = divmod(rem, 3600); minutes = rem // 60
+        uptime = f"UP {days}d {hours}h {minutes}m"
+    except (OSError, ValueError, IndexError):
+        pass
+    return cpu, ram, disk + "  " + uptime
+
+
+def dashboard() -> None:
+    try:
+        import services_manager
+        data = services_manager.state()
+        accounts = data.get("accounts", {})
+        domain = data.get("domain") or "domain not configured"
+    except (ImportError, OSError, ValueError):
+        accounts, domain = {}, "domain not configured"
+    cpu, ram, disk_uptime = _system_metrics()
+    width = max(58, min(shutil.get_terminal_size((80, 24)).columns, 100))
+    cyan, blue, yellow, reset = "\033[96m", "\033[94m", "\033[93m", "\033[0m"
+    print("\n" + cyan + "╔" + "═" * (width - 2) + "╗")
+    print("║" + "KEN-NET  •  SERVER MANAGEMENT PANEL".center(width - 2) + "║")
+    print("╚" + "═" * (width - 2) + "╝" + reset)
+    print(f"{cpu}   {ram}   {disk_uptime}")
+    print(f"DOMAIN  {domain}")
+    totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan")}
+    wg_total = dnstt_total = wg_online = dnstt_ready = 0
+    try:
+        import wireguard_manager
+        peers = wireguard_manager.list_peers()
+        wg_total = len(peers)
+        wg_online = sum(bool(wireguard_manager.peer_details(record.get("interface", "wg0"), name).get("connected")) for name, record in peers.items())
+    except (ImportError, OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        import dnstt_manager
+        dnstt_accounts = dnstt_manager.list_accounts()
+        dnstt_total = len(dnstt_accounts)
+        dnstt_ready = sum(systemd_active(record.get("service", "")) for record in dnstt_accounts.values())
+    except (ImportError, OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        import services_manager
+        live_ssh = len(services_manager.active_connections("ssh"))
+    except (ImportError, OSError, ValueError):
+        live_ssh = 0
+    try:
+        import services_manager
+        xray_online = {key: services_manager.active_connections(key).get("active connections (not unique users)", 0) for key in ("vless", "vmess", "trojan")}
+    except (ImportError, OSError, ValueError):
+        xray_online = {key: 0 for key in ("vless", "vmess", "trojan")}
+    for key, label in (("ssh", "SSH"), ("vmess", "VMESS"), ("vless", "VLESS"), ("trojan", "TROJAN")):
+        online = live_ssh if key == "ssh" else xray_online.get(key, 0)
+        qualifier = "sessions" if key in {"vmess", "vless", "trojan"} else "online"
+        print(f"  {label:<8} {online:>3} {qualifier:<8} • {totals.get(key, 0):>3} accounts")
+    print(f"  {'WIREGUARD':<8} {wg_online:>3} peers    • {wg_total:>3} accounts")
+    print(f"  {'DNSTT':<8} {dnstt_ready:>3} services • {dnstt_total:>3} endpoints")
+    print(blue + "\n── ACCOUNTS ──────────────────────────────────────────────────────────" + reset)
+    left = (("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"), ("05", "DROPBEAR"), ("06", "OPENVPN"))
+    right = (("07", "UDP CUSTOM"), ("08", "WIREGUARD"), ("09", "SLOWDNS"), ("10", "DNSTT"), ("11", "TLS / DOMAIN"))
+    for index in range(max(len(left), len(right))):
+        first = f"[{left[index][0]}] {left[index][1]}" if index < len(left) else ""
+        second = f"[{right[index][0]}] {right[index][1]}" if index < len(right) else ""
+        print(f"  {first:<28} {second}")
+    print(yellow + "── SYSTEM & TOOLS ────────────────────────────────────────────────────" + reset)
+    print("  [12] PROTOCOL STATUS       [13] SERVICES / PORTS       [0] EXIT")
+    print("\n" + "─ " * (width // 2))
+    print("Select option [0-13]: ", end="", flush=True)
 
 
 def is_root() -> bool:
@@ -152,6 +253,10 @@ def manage_protocol(p: Protocol) -> None:
         import services_manager
         services_manager.menu(p.key)
         return
+    if p.key in {"openvpn", "udp"}:
+        print("This protocol does not yet have a real account backend in this build.")
+        print("Account create/renew/delete/details/trial/online actions are unavailable until its service is implemented.")
+        return
     actions: tuple[tuple[str, str | None], ...] = (("Create account", p.add), ("Delete account", p.delete), ("Renew account", p.renew))
     available = [(label, path) for label, path in actions if path]
     if not available:
@@ -180,23 +285,19 @@ def main() -> int:
         print("This program is intended for Ubuntu/Linux servers.")
         return 2
     while True:
-        print("\n=== Private Account Manager ===")
-        print("1. Protocol status")
-        print("2. Manage a protocol")
-        print("3. Show requested services and ports")
-        print("0. Exit")
-        choice = input("Select: ").strip()
+        dashboard()
+        choice = input().strip()
         if choice == "0":
             return 0
-        if choice == "1":
+        if choice == "12":
             show_status()
-        elif choice == "2":
-            p = choose_protocol()
-            if p:
-                manage_protocol(p)
-        elif choice == "3":
+        elif choice == "13":
             import service_catalog
             service_catalog.show()
+        elif choice.isdigit() and 1 <= int(choice) <= 11:
+            ordered = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
+            p = next(item for item in PROTOCOLS if item.key == ordered[int(choice) - 1])
+            manage_protocol(p)
         else:
             print("Invalid selection.")
 

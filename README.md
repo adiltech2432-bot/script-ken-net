@@ -1,19 +1,28 @@
 # Ken-net Terminal Manager
 
-Editable terminal management for Ubuntu 24.04. The manager has separate menus for SSH, TLS/domain certificates, VLESS, VMess, Trojan, UDP, WireGuard, SlowDNS, and DNSTT.
+An editable English terminal manager for Ubuntu 24.04. The home screen is a colored server dashboard with system metrics, domain, account/session counts, and a two-column protocol menu.
 
-The terminal's **Show requested services and ports** screen now lists the services and ports from the supplied reference images, including Dropbear, OpenVPN, SSH WebSocket, Xray transports, Shadowsocks, Nginx/HAProxy, BadVPN UDP gateway, and DNS tunnel. It is a reference and conflict report; it does not imply every listed daemon and transport has been installed.
+## Managed features
 
-## Implemented account services
+- **SSH:** create accounts with generated passwords, renew, delete, view details, create one-day trials, list managed accounts, view connected login sessions, and automatically remove expired accounts.
+- **Dropbear:** install a separate Dropbear service on TCP/109 and TCP/143 and manage accounts through the shared SSH account store.
+- **VLESS, VMess, Trojan:** install Xray-core; create TLS accounts, print client links, renew, delete, view details, create one-day trials, list accounts, view aggregate established connection counts, and automatically expire accounts. Config changes are checked before restarting Xray. Default ports are TCP/443, TCP/8443, and TCP/2053.
+- **TLS/domain:** setting a domain immediately checks DNS and requests/installs a Let's Encrypt certificate using Certbot's no-email registration mode. The DNS A/AAAA record must already point to this VPS. TCP/80 must be reachable and unused for standalone issuance, and reachable for renewal. The manager does not edit DNS provider records.
+- **WireGuard:** configure a server and create peers/client profiles; renew, delete, inspect, create one-day trial peers, list accounts, view recent-handshake status, and automatically remove expired peers.
+- **DNSTT:** configure a delegated DNS zone and router, create isolated endpoints with their own server keys and services, renew/delete/inspect/list endpoints, create one-day trials, view service state, and automatically remove expired endpoints.
 
-- **SSH:** installs OpenSSH Server, creates expiring Linux users with generated passwords, lists and deletes managed accounts.
-- **Dropbear:** installs a separate Dropbear daemon on TCP/109 and TCP/143, using the same Linux SSH accounts.
-- **VLESS, VMess, Trojan:** installs official Xray-core, stores accounts in Xray JSON, validates configuration before service restart, prints client links, and removes accounts. These use TCP+TLS on ports 443, 8443, and 2053.
-- **TLS:** stores the shared domain and obtains a Let's Encrypt certificate. The domain's DNS A/AAAA record must point to this VPS. TCP/80 must be reachable for initial issuance and renewal.
-- **WireGuard:** creates the server interface, configures IPv4 forwarding/NAT, provisions named peers and mode-0600 client files, and revokes peers.
-- **DNSTT:** creates separate endpoints with separate server keys and systemd services, and removes them individually. Requires DNS delegation and UDP/53.
+The **Services / Ports** screen catalogs the services and ports shown in the supplied reference images. It also identifies shared-port conflicts. It does not imply that every listed daemon is installed or managed.
 
-TLS is a transport setting for the Xray accounts, not a standalone account protocol. UDP is not a single standardized account protocol; the current menu reports it as unsupported rather than claiming a working account system. SlowDNS and DNSTT use overlapping DNS-tunnel technology; the DNSTT manager implements isolated account endpoints, but it does not reproduce proprietary client-specific SlowDNS formats.
+## Important protocol limits
+
+- **OpenVPN, legacy UDP Custom, standalone WebSocket bridges, Shadowsocks standalone transport menus, Nginx, and HAProxy** are not implemented as account backends in this build. Their service/port entries are informational, and the terminal reports these protocols as unavailable.
+- **TLS** is a certificate transport used by Xray accounts, not a standalone account protocol.
+- **UDP Custom** is not one standard protocol; the compatible server and client format have to be selected before implementing its account lifecycle.
+- **SlowDNS** implementations often use proprietary client formats. This project offers the separate-endpoint DNSTT manager, not a drop-in SlowDNS replacement.
+- Vanilla DNSTT authenticates the server, not the client. Anyone with endpoint details can use that endpoint. Removing it stops the endpoint for all users. [DNSTT authentication documentation](https://github.com/Mygod/dnstt/blob/plugin/README#encryption-and-authentication).
+- Xray connection counts are established TCP sockets, not unique user counts. DNSTT status reports endpoint services; DNSTT does not authenticate or count individual clients.
+- Public DNS records, provider firewalls, and domain ownership are external prerequisites. The manager cannot configure them.
+- This build has not been tested against a live VPS or external VPN clients. Validate each client connection after configuring DNS and provider firewall rules.
 
 ## Install
 
@@ -22,23 +31,14 @@ curl -fsSL https://raw.githubusercontent.com/adiltech2432-bot/script-ken-net/mai
 sudo kennet-panel
 ```
 
-The installer runs the local test suite and copies the terminal manager to `/opt/kennet-panel`.
+The installer runs the local test suite and copies the manager to `/opt/kennet-panel`.
 
 ## Domains and ports
 
-Set the shared domain from the TLS/domain menu, then point its DNS A/AAAA record to the VPS. TLS certificate issuance needs inbound TCP/80. Xray account inbounds use TCP/443 (VLESS), TCP/8443 (VMess), and TCP/2053 (Trojan). SSH uses TCP/22 by default. WireGuard uses the UDP port selected during setup (51820 by default). DNSTT listens on UDP/53 by default.
+Set the shared domain from the TLS/domain menu; the manager checks DNS and requests a certificate without asking for an email address. Point the domain's A/AAAA record to the VPS first. Certificate issuance needs inbound TCP/80, and standalone issuance cannot proceed while another service is listening on TCP/80. Xray defaults are TCP/443 (VLESS), TCP/8443 (VMess), and TCP/2053 (Trojan). SSH uses TCP/22. WireGuard uses its configured UDP port (51820 by default). DNSTT listens on UDP/53 by default.
 
-The supplied reference also shows TCP 109/143 (Dropbear), TCP 1194 and UDP 2200 (OpenVPN), TCP 80/81/443 (web frontend), and UDP 7100/7200/7300 (BadVPN UDP gateway, matching the legacy server details already provided). Dropbear is managed; OpenVPN and the other listed transport daemons are not all enabled by the current installer. The port matrix identifies shared TCP 80/443 listeners because those must be multiplexed through a compatible frontend instead of independently binding each service.
+The catalog also includes TCP/109 and TCP/143 (Dropbear), TCP/1194 and UDP/2200 (OpenVPN), TCP/80/81/443 (web frontend), and UDP/7100/7200/7300 (BadVPN gateway). OpenVPN and the other informational services are not necessarily enabled. TCP/80 and TCP/443 cannot be independently bound by multiple services; a compatible frontend is required to multiplex them.
 
-When UFW is already active, the manager asks before adding only the needed host firewall allowances. It does not enable UFW, because enabling a host firewall without reviewing SSH access can lock out the server. A provider-side firewall must be configured separately in the VPS control panel; the script cannot open provider network rules.
-
-## Important limitations
-
-- Account protocols run on the VPS only after their setup menu has installed and configured the service.
-- Public DNS records, provider firewalls, and domain ownership are external prerequisites; they cannot be configured automatically by this program.
-- The UDP entry requires choosing a specific compatible UDP tunnel implementation and client format before account management can be implemented.
-- OpenVPN, standalone WebSocket bridges, Shadowsocks standalone transport menus, Nginx, and HAProxy are currently documented in the requested service/port matrix but are not all installed or managed by this version.
-- Vanilla DNSTT authenticates the server, not the client. Anyone who obtains an endpoint's connection details can use it. Removing an endpoint disconnects all users of that endpoint. [Official DNSTT documentation](https://github.com/Mygod/dnstt/blob/plugin/README#encryption-and-authentication).
-- No live VPS protocol test is included. Verify each external client connection after configuring DNS and provider firewall rules.
+When UFW is active, the manager asks before adding narrow firewall allowances. It does not enable UFW, since doing so without reviewing SSH access can lock out the server. Provider-side firewall rules must be configured in the VPS control panel.
 
 Run local tests with `python3 -m unittest -v`.

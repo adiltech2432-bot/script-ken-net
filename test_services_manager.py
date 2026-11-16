@@ -3,6 +3,8 @@ import json
 import unittest
 
 import services_manager as services
+from unittest.mock import patch
+from types import SimpleNamespace
 
 
 class ServiceManagerTests(unittest.TestCase):
@@ -26,6 +28,17 @@ class ServiceManagerTests(unittest.TestCase):
 
     def test_protocol_ports_are_distinct(self):
         self.assertEqual(len(set(services.XRAY_PORTS.values())), 3)
+
+    @patch.object(services, "_run")
+    @patch.object(services, "open_ports")
+    @patch.object(services.subprocess, "run")
+    @patch.object(services.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("203.0.113.8", 0))])
+    def test_tls_certificate_uses_email_free_registration(self, _dns, run, allow, command):
+        run.return_value = SimpleNamespace(stdout="", returncode=1)
+        with patch.object(services.shutil, "which", return_value=None):
+            services.acquire_tls_certificate("vpn.example.com")
+        certbot = [call.args[0] for call in command.mock_calls]
+        self.assertTrue(any("--register-unsafely-without-email" in args for args in certbot))
 
 
 if __name__ == "__main__":

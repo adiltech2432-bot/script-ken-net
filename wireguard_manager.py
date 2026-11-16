@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
@@ -213,9 +213,11 @@ def _interface_config(interface: str) -> Path:
 
 
 def add_peer(interface: str, username: str, endpoint: str, dns: str = "1.1.1.1",
-             allowed_ips: str = "0.0.0.0/0, ::/0") -> Path:
+             allowed_ips: str = "0.0.0.0/0, ::/0", days: int = 30, *, trial: bool = False) -> Path:
     if not NAME_RE.fullmatch(username):
         raise ValueError("Username must contain 3-32 letters, digits, or underscores")
+    if not 1 <= int(days) <= 3650:
+        raise ValueError("Validity must be between 1 and 3650 days")
     if not shutil.which("wg"):
         raise RuntimeError("Install wireguard-tools and configure a server interface first")
     config_path = _interface_config(interface)
@@ -248,10 +250,13 @@ def add_peer(interface: str, username: str, endpoint: str, dns: str = "1.1.1.1",
     try:
         _atomic_text(profile_path, profile)
         state[username] = {
+            "interface": interface,
             "public_key": public_key,
             "address": client_address,
             "profile": str(profile_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (date.today() + timedelta(days=int(days))).isoformat(),
+            "trial": trial,
         }
         _atomic_text(peer_state, json.dumps(state, indent=2) + "\n")
     except Exception:
@@ -259,7 +264,52 @@ def add_peer(interface: str, username: str, endpoint: str, dns: str = "1.1.1.1",
         _atomic_text(config_path, config_text)
         profile_path.unlink(missing_ok=True)
         raise
+    import services_manager
+    services_manager.install_expiry_timer()
     return profile_path
+
+
+def list_peers() -> dict:
+    path = ROOT / "peers.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def renew_peer(username: str, days: int) -> None:
+    if not NAME_RE.fullmatch(username) or not 1 <= int(days) <= 3650:
+        raise ValueError("Invalid username or validity period")
+    peers = list_peers()
+    if username not in peers:
+        raise ValueError("Managed WireGuard peer not found")
+    peers[username]["expires_at"] = (date.today() + timedelta(days=int(days))).isoformat()
+    peers[username]["trial"] = False
+    _atomic_text(ROOT / "peers.json", json.dumps(peers, indent=2) + "\n")
+
+
+def peer_details(interface: str, username: str) -> dict:
+    peers = list_peers()
+    if username not in peers:
+        raise ValueError("Managed WireGuard peer not found")
+    record = dict(peers[username])
+    dump = subprocess.run(["wg", "show", interface, "dump"], capture_output=True, text=True, check=False)
+    if dump.returncode == 0:
+        for row in dump.stdout.splitlines()[1:]:
+            fields = row.split("\t")
+            if fields and fields[0] == record.get("public_key") and len(fields) > 4:
+                record["last_handshake_epoch"] = int(fields[4])
+                record["connected"] = int(fields[4]) > 0 and (datetime.now(timezone.utc).timestamp() - int(fields[4])) < 180
+                break
+    return record
+
+
+def purge_expired(today: date | None = None) -> list[str]:
+    today = today or date.today()
+    peers = list_peers()
+    expired = [name for name, record in peers.items()
+               if record.get("expires_at") and date.fromisoformat(record["expires_at"]) < today]
+    for name in expired:
+        interface = peers[name].get("interface", "wg0")
+        remove_peer(interface, name)
+    return expired
 
 
 def remove_peer(interface: str, username: str) -> None:
@@ -273,11 +323,13 @@ def remove_peer(interface: str, username: str) -> None:
     if username not in state:
         raise ValueError("Managed WireGuard peer not found")
     public_key = state[username]["public_key"]
+    active = subprocess.run(["wg", "show", interface], capture_output=True, text=True, check=False).returncode == 0
     old_text = config_path.read_text(encoding="utf-8")
     new_text = replace_or_append_peer(old_text, public_key, None)
     _atomic_text(config_path, new_text)
     try:
-        _run(["wg", "set", interface, "peer", public_key, "remove"])
+        if active:
+            _run(["wg", "set", interface, "peer", public_key, "remove"])
     except Exception:
         _atomic_text(config_path, old_text)
         raise
@@ -289,19 +341,22 @@ def remove_peer(interface: str, username: str) -> None:
 def menu() -> None:
     interface = input("WireGuard interface name [wg0]: ").strip() or "wg0"
     while True:
-        print("\nWireGuard — manage peers on a configured interface")
-        print("1. Install and configure a WireGuard server")
-        print("2. Create a client profile and add a peer")
-        print("3. Remove a peer and its profile")
-        print("0. Return")
+        print("\n=== WIREGUARD ACCOUNT MANAGER ===")
+        print("[01] Install / configure server       [06] Create trial peer")
+        print("[02] Create peer                      [07] List accounts")
+        print("[03] Renew peer                       [08] Show connected peers")
+        print("[04] Delete peer                      [09] Peer details")
+        print("[05] Service status                   [00] Return")
         choice = input("Select: ").strip()
         try:
-            if choice == "0":
+            if choice in {"0", "00"}:
                 return
             if choice == "1":
                 setup_server(interface)
-            elif choice == "2":
-                name = input("Username: ").strip()
+            elif choice in {"2", "6"}:
+                trial = choice == "6"
+                name = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 try:
                     import services_manager
                     default_host = services_manager.state().get("domain", "")
@@ -310,14 +365,34 @@ def menu() -> None:
                 default_endpoint = f"{default_host}:51820" if default_host else ""
                 endpoint = input(f"Server address and port [{default_endpoint}]: ").strip() or default_endpoint
                 dns = input("DNS [1.1.1.1]: ").strip() or "1.1.1.1"
-                path = add_peer(interface, name, endpoint, dns)
-                print(f"Client profile created: {path}")
+                path = add_peer(interface, name, endpoint, dns, days=days, trial=trial)
+                print(f"Client profile created: {path}\nExpires: {(date.today() + timedelta(days=days)).isoformat()}")
                 print("Transfer this file securely; it contains the client's private key.")
             elif choice == "3":
+                name = input("Username: ").strip()
+                days = int(input("Extend validity by days [30]: ").strip() or "30")
+                renew_peer(name, days)
+                print("Peer renewed.")
+            elif choice == "4":
                 name = input("Username: ").strip()
                 if input(f"Confirm removal of peer {name}? Type YES: ").strip() == "YES":
                     remove_peer(interface, name)
                     print("Peer and client profile removed.")
+            elif choice == "5":
+                result = subprocess.run(["systemctl", "is-active", f"wg-quick@{interface}.service"], capture_output=True, text=True)
+                print(f"WireGuard {interface}: {result.stdout.strip() or 'inactive'}")
+            elif choice == "7":
+                purge_expired()
+                for name, record in sorted(list_peers().items()):
+                    print(f"- {name} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+            elif choice == "8":
+                for name in sorted(list_peers()):
+                    details = peer_details(interface, name)
+                    if details.get("connected"):
+                        print(f"- {name}: handshake within 3 minutes")
+            elif choice == "9":
+                name = input("Username: ").strip()
+                print(json.dumps(peer_details(interface, name), indent=2))
             else:
                 print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
