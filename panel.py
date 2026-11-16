@@ -177,6 +177,7 @@ def main() -> int:
         print("\n=== Private Account Manager ===")
         print("1. Protocol status")
         print("2. Manage a protocol")
+        print("3. Show requested services and ports")
         print("0. Exit")
         choice = input("Select: ").strip()
         if choice == "0":
@@ -187,6 +188,9 @@ def main() -> int:
             p = choose_protocol()
             if p:
                 manage_protocol(p)
+        elif choice == "3":
+            import service_catalog
+            service_catalog.show()
         else:
             print("Invalid selection.")
 
