@@ -24,12 +24,12 @@ class PanelTests(unittest.TestCase):
             panel.Path, "is_file", return_value=True
         ):
             state, _ = panel.protocol_state(p)
-        self.assertEqual(state, "جاهز عبر أدوات الخادم")
+        self.assertEqual(state, "Ready via server tools")
 
     def test_dnstt_is_not_reported_as_ready_without_detected_services(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "dnstt")
         state, _ = panel.protocol_state(p)
-        self.assertEqual(state, "غير جاهز")
+        self.assertEqual(state, "Not ready")
 
     def test_detected_udp_service_is_reported_active_without_claiming_account_support(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "udp")
@@ -37,8 +37,8 @@ class PanelTests(unittest.TestCase):
             panel.Path, "is_file", return_value=True
         ):
             state, detail = panel.protocol_state(p)
-        self.assertEqual(state, "نشط")
-        self.assertIn("إدارة الحسابات لم تُحدد", detail)
+        self.assertEqual(state, "Active")
+        self.assertIn("account management is not mapped yet", detail)
 
     def test_slowdns_and_dnstt_share_detected_server_services(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "slowdns")
@@ -46,7 +46,7 @@ class PanelTests(unittest.TestCase):
             panel.Path, "is_file", return_value=True
         ):
             state, detail = panel.protocol_state(p)
-        self.assertEqual(state, "نشط")
+        self.assertEqual(state, "Active")
         self.assertIn("dnstt-server", detail)
 
     @patch.object(panel.subprocess, "run")
@@ -60,4 +60,3 @@ class PanelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

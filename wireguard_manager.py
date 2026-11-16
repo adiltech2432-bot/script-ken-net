@@ -159,10 +159,10 @@ def setup_server(interface: str = "wg0") -> None:
     config_path = Path("/etc/wireguard") / f"{interface}.conf"
     if config_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing config: {config_path}")
-    address = input("عنوان الواجهة [10.66.66.1/24]: ").strip() or "10.66.66.1/24"
+    address = input("Interface address [10.66.66.1/24]: ").strip() or "10.66.66.1/24"
     try:
         parsed_address = ipaddress.ip_interface(address)
-        port = int(input("منفذ UDP [51820]: ").strip() or "51820")
+        port = int(input("UDP port [51820]: ").strip() or "51820")
     except ValueError as exc:
         raise ValueError("Invalid interface address or UDP port") from exc
     if not isinstance(parsed_address, ipaddress.IPv4Interface):
@@ -177,9 +177,9 @@ def setup_server(interface: str = "wg0") -> None:
     if not match:
         raise RuntimeError("Could not detect the VPS egress interface")
     egress = match.group(1)
-    print(f"سيتم تثبيت WireGuard وإعداد {interface} على {address} والمنفذ UDP {port} عبر {egress}.")
-    print("سيضاف NAT وتمرير IPv4، وقد تحتاج لفتح المنفذ في جدار مزود VPS.")
-    if input("اكتب YES للمتابعة: ").strip() != "YES":
+    print(f"WireGuard will be installed and {interface} configured at {address} on UDP port {port} via {egress}.")
+    print("IPv4 forwarding and NAT will be configured. You may also need to open this port in your VPS provider firewall.")
+    if input("Type YES to continue: ").strip() != "YES":
         return
     _run(["apt-get", "update"])
     _run(["apt-get", "install", "-y", "wireguard-tools", "iptables"])
@@ -194,8 +194,8 @@ def setup_server(interface: str = "wg0") -> None:
         config_path.unlink(missing_ok=True)
         sysctl_path.unlink(missing_ok=True)
         raise
-    print(f"تم إعداد الواجهة {interface}. المفتاح العام للخادم: {public_key}")
-    print(f"افتح UDP/{port} في لوحة مزود VPS قبل اختبار اتصال عميل خارجي.")
+    print(f"Interface {interface} is configured. Server public key: {public_key}")
+    print(f"Open UDP/{port} in your VPS provider control panel before testing an external client.")
 
 
 def _interface_config(interface: str) -> Path:
@@ -282,33 +282,32 @@ def remove_peer(interface: str, username: str) -> None:
 
 
 def menu() -> None:
-    interface = input("اسم واجهة WireGuard [wg0]: ").strip() or "wg0"
+    interface = input("WireGuard interface name [wg0]: ").strip() or "wg0"
     while True:
-        print("\nWireGuard — إضافة/إزالة أقران على واجهة مهيأة")
-        print("1. تثبيت وإعداد خادم WireGuard")
-        print("2. إنشاء ملف عميل وإضافة peer")
-        print("3. حذف peer وملفه")
-        print("0. رجوع")
-        choice = input("اختر: ").strip()
+        print("\nWireGuard — manage peers on a configured interface")
+        print("1. Install and configure a WireGuard server")
+        print("2. Create a client profile and add a peer")
+        print("3. Remove a peer and its profile")
+        print("0. Return")
+        choice = input("Select: ").strip()
         try:
             if choice == "0":
                 return
             if choice == "1":
                 setup_server(interface)
             elif choice == "2":
-                name = input("اسم المستخدم: ").strip()
-                endpoint = input("عنوان الخادم والمنفذ، مثال vpn.example.com:51820: ").strip()
+                name = input("Username: ").strip()
+                endpoint = input("Server address and port, e.g. vpn.example.com:51820: ").strip()
                 dns = input("DNS [1.1.1.1]: ").strip() or "1.1.1.1"
                 path = add_peer(interface, name, endpoint, dns)
-                print(f"تم إنشاء ملف العميل: {path}")
-                print("انقل الملف إلى جهاز المستخدم بأمان؛ يحتوي مفتاحه الخاص.")
+                print(f"Client profile created: {path}")
+                print("Transfer this file securely; it contains the client's private key.")
             elif choice == "3":
-                name = input("اسم المستخدم: ").strip()
-                if input(f"تأكيد حذف peer {name}? اكتب YES: ").strip() == "YES":
+                name = input("Username: ").strip()
+                if input(f"Confirm removal of peer {name}? Type YES: ").strip() == "YES":
                     remove_peer(interface, name)
-                    print("تم حذف peer وملف العميل.")
+                    print("Peer and client profile removed.")
             else:
-                print("اختيار غير صالح")
+                print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
-            print(f"تعذر تنفيذ العملية: {exc}")
-
+            print(f"Could not complete the operation: {exc}")

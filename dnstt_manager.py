@@ -53,7 +53,7 @@ def install_tools() -> bool:
     """Build the upstream DNSTT server and client into /usr/local/bin."""
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         raise RuntimeError("Run as root")
-    if input("سيتم تثبيت Go عند الحاجة وبناء dnstt-server وdnstt-client من المصدر الرسمي. اكتب YES: ").strip() != "YES":
+    if input("Go may be installed if needed, then dnstt-server and dnstt-client will be built from the official source. Type YES: ").strip() != "YES":
         return False
     if not shutil.which("go"):
         _run(["apt-get", "update"])
@@ -103,12 +103,12 @@ def _configuration() -> dict:
 def configure() -> None:
     old = _read_json(CONFIG, {})
     values = {
-        "base_domain": input(f"نطاق DNSTT الأب [{old.get('base_domain', '')}]: ").strip() or old.get("base_domain", ""),
-        "nameserver_host": input(f"اسم خادم DNS [{old.get('nameserver_host', '')}]: ").strip() or old.get("nameserver_host", ""),
-        "doh_url": input(f"رابط DoH [{old.get('doh_url', 'https://cloudflare-dns.com/dns-query')}]: ").strip() or old.get("doh_url", "https://cloudflare-dns.com/dns-query"),
-        "forward_address": input(f"وجهة النفق على الخادم [{old.get('forward_address', '127.0.0.1:443')}]: ").strip() or old.get("forward_address", "127.0.0.1:443"),
-        "server_binary": input(f"مسار dnstt-server [{old.get('server_binary', '/usr/local/bin/dnstt-server')}]: ").strip() or old.get("server_binary", "/usr/local/bin/dnstt-server"),
-        "dns_listen": input(f"عنوان استماع DNS [{old.get('dns_listen', '0.0.0.0:53')}]: ").strip() or old.get("dns_listen", "0.0.0.0:53"),
+        "base_domain": input(f"DNSTT base domain [{old.get('base_domain', '')}]: ").strip() or old.get("base_domain", ""),
+        "nameserver_host": input(f"DNS nameserver hostname [{old.get('nameserver_host', '')}]: ").strip() or old.get("nameserver_host", ""),
+        "doh_url": input(f"DoH URL [{old.get('doh_url', 'https://cloudflare-dns.com/dns-query')}]: ").strip() or old.get("doh_url", "https://cloudflare-dns.com/dns-query"),
+        "forward_address": input(f"Server tunnel destination [{old.get('forward_address', '127.0.0.1:443')}]: ").strip() or old.get("forward_address", "127.0.0.1:443"),
+        "server_binary": input(f"Path to dnstt-server [{old.get('server_binary', '/usr/local/bin/dnstt-server')}]: ").strip() or old.get("server_binary", "/usr/local/bin/dnstt-server"),
+        "dns_listen": input(f"DNS listen address [{old.get('dns_listen', '0.0.0.0:53')}]: ").strip() or old.get("dns_listen", "0.0.0.0:53"),
     }
     if not DOMAIN_RE.fullmatch(values["base_domain"].lower().rstrip(".")):
         raise ValueError("Invalid DNSTT base domain")
@@ -330,44 +330,43 @@ def remove_account(username: str) -> None:
 
 def menu() -> None:
     while True:
-        print("\nDNSTT — نطاق وخدمة مستقلة لكل اسم (DNSTT لا يصادق هوية العميل)")
-        print("1. بناء أدوات DNSTT الرسمية")
-        print("2. إعداد النطاق وخادم DNSTT")
-        print("3. تثبيت موجّه DNS متعدد النطاقات")
-        print("4. إنشاء حساب/نفق")
-        print("5. إبطال وحذف حساب/نفق")
-        print("0. رجوع")
-        choice = input("اختر: ").strip()
+        print("\nDNSTT — a separate domain and service for each name (DNSTT does not authenticate clients)")
+        print("1. Build the official DNSTT tools")
+        print("2. Configure the domain and DNSTT server")
+        print("3. Install the multi-domain DNS router")
+        print("4. Create an account/tunnel")
+        print("5. Revoke and remove an account/tunnel")
+        print("0. Return")
+        choice = input("Select: ").strip()
         try:
             if choice == "0":
                 return
             if choice == "1":
                 if install_tools():
-                    print("تم تثبيت dnstt-server وdnstt-client في /usr/local/bin")
+                    print("Installed dnstt-server and dnstt-client in /usr/local/bin")
             elif choice == "2":
                 configure()
-                print(f"تم حفظ الإعداد: {CONFIG}")
+                print(f"Configuration saved: {CONFIG}")
             elif choice == "3":
-                if input("سيبدأ موجّه DNS. تأكد أن المنفذ المحدد غير مستخدم. اكتب YES للمتابعة: ").strip() == "YES":
+                if input("The DNS router will start. Make sure the selected port is available. Type YES to continue: ").strip() == "YES":
                     install_router()
-                    print("تم تثبيت موجّه DNS.")
+                    print("DNS router installed.")
             elif choice == "4":
-                username = input("اسم المستخدم: ").strip()
+                username = input("Username: ").strip()
                 try:
-                    port = int(input("منفذ العميل المحلي [7000]: ").strip() or "7000")
+                    port = int(input("Local client port [7000]: ").strip() or "7000")
                 except ValueError:
-                    print("المنفذ غير صالح")
+                    print("Invalid port")
                     continue
                 profile, records = add_account(username, port)
-                print(f"تم إنشاء الملف: {profile}\n{records}")
-                print("يحتوي مجلد الحساب على مفتاح الخادم الخاص؛ لا تشاركه مع المستخدم.")
+                print(f"Profile created: {profile}\n{records}")
+                print("The account directory contains the server private key; do not share it with the client.")
             elif choice == "5":
-                username = input("اسم المستخدم: ").strip()
-                if input(f"سيتم إيقاف endpoint {username} لكل من يستخدم تفاصيله. اكتب YES: ").strip() == "YES":
+                username = input("Username: ").strip()
+                if input(f"Endpoint {username} will be stopped for everyone using its details. Type YES: ").strip() == "YES":
                     remove_account(username)
-                    print("تم إيقاف النفق وحذف المفتاح والخدمة.")
+                    print("Tunnel stopped; key and service removed.")
             else:
-                print("اختيار غير صالح")
+                print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
-            print(f"تعذر تنفيذ العملية: {exc}")
-
+            print(f"Could not complete the operation: {exc}")

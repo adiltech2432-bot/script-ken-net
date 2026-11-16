@@ -38,4 +38,3 @@ chmod 0750 /usr/local/bin/kennet-panel
 
 echo "Installed. Start the terminal menu with: sudo kennet-panel"
 echo "Only WireGuard and DNSTT additions are provisioned here; existing protocol helper commands must be installed separately."
-

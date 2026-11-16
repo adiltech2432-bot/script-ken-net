@@ -1,46 +1,44 @@
-# مدير الحسابات الطرفي
+# Ken-net Terminal Manager
 
-هذا مشروع طرفي قابل للتعديل لخادم Ubuntu. هذه الحزمة تنفذ إعداد وإدارة WireGuard وDNSTT. واجهة SSH/Xray تستدعي أدوات الخادم القديمة عند وجودها؛ خادم Ubuntu الفارغ لا يحتوي تلك الأدوات، ولذلك لا تعتبر هذه الحزمة مثبتًا مستقلاً لبقية البروتوكولات.
+An editable terminal manager for Ubuntu servers. This package provides independent setup and account management for WireGuard and DNSTT. SSH and Xray protocol actions delegate to helper commands from the original server installation. Those legacy helpers are not installed by this package, so a fresh Ubuntu server will not get full SSH/Xray account provisioning from it.
 
 ## WireGuard
 
-- يثبت `wireguard-tools` و`iptables` عند اختيار إعداد الخادم.
-- ينشئ واجهة IPv4، ويضبط التوجيه وNAT، ثم يشغّل `wg-quick@<interface>`.
-- ينشئ لكل مستخدم مفتاحًا وعنوانًا فريدين وملف عميل بصلاحية `0600`.
-- يحذف peer من الواجهة الحية ومن ملف الإعداد، ويلغي ملف العميل.
-- يتطلب فتح منفذ UDP المختار في جدار مزود VPS. واجهة الإعداد لا تغيّر إعدادات الجدار الخارجي.
+- Installs `wireguard-tools` and `iptables` when server setup is selected.
+- Creates an IPv4 interface, configures forwarding and NAT, and starts `wg-quick@<interface>`.
+- Creates a unique key, address, and mode `0600` client profile for each peer.
+- Removes a peer from the live interface and configuration file, then deletes its client profile.
+- You must open the selected UDP port in your VPS provider firewall. The setup does not change the provider firewall.
 
 ## DNSTT
 
-- ينشئ لكل اسم نطاقًا ومفتاح خادم وخدمة `dnstt-server` مستقلة، ويُشغّل موجّه DNS يختار النفق حسب النطاق.
-- عند حذف الاسم، يوقف endpoint ويحذف خدمته ومفتاحه ومساره؛ ينقطع كل من يستخدم ذلك endpoint.
-- يحتاج نطاقًا تملكه وخادم DNS (NS) خارج النطاق المفوّض. يمكن للواجهة بناء أداتي `dnstt-server` و`dnstt-client`، وتطلب إعداد النطاق والوجهة ولا تغيّر سجلات مزود النطاق.
-- يطبع سجلات DNS التي يجب إضافتها لكل حساب. يلزم أن تصل طلبات UDP/53 إلى موجّه DNS.
-- يرفض التثبيت إذا كان `server.service` القديم نشطًا؛ نفّذ التجربة على VPS منفصل حتى لا يتأثر SlowDNS الحالي.
+- Creates a separate server key, systemd service, and DNS route for each account name.
+- Removing an account stops its endpoint and removes its service, key, and route. Everyone using that endpoint will be disconnected.
+- Requires a domain you control and a DNS nameserver outside the delegated tunnel zone. The manager can build the official `dnstt-server` and `dnstt-client` tools, but it does not change DNS provider records.
+- Prints DNS records to add for each account. UDP/53 must reach the DNS router.
+- Refuses to install its router while the old `server.service` is active. Use a separate test VPS so the existing SlowDNS service is not disrupted.
 
-**تنبيه أمني:** DNSTT الرسمي يصادق الخادم ولا يصادق العميل. لذلك النطاق والمفتاح العام ليسا كلمة مرور؛ أي شخص يحصل على تفاصيل endpoint يستطيع استخدامه، وحذفه يقطع جميع مستخدميه. إذا كنت تحتاج تحققًا مستقلًا لكل عميل، اربط النفق بخدمة خلفية تتطلب بيانات اعتماد منفصلة. [توثيق DNSTT الرسمي](https://github.com/Mygod/dnstt/blob/plugin/README#encryption-and-authentication).
+**Security note:** Official DNSTT authenticates the server, not the client. A domain and public key are not a client password. Anyone with an endpoint's connection details can use it; removing that endpoint disconnects all its users. For per-client authentication, forward the tunnel to a backend that requires separate credentials. [Official DNSTT documentation](https://github.com/Mygod/dnstt/blob/plugin/README#encryption-and-authentication).
 
-## التشغيل
+## Install and run
 
-بعد نشر المستودع العام، ثبّت البرنامج على Ubuntu بالأمر:
+On Ubuntu, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adiltech2432-bot/script-ken-net/main/install-remote.sh | sudo bash
 sudo kennet-panel
 ```
 
-أو نزّل ملفات المستودع وشغّل `sudo bash install.sh` من مجلده.
+Alternatively, download the repository and run `sudo bash install.sh` from its directory. Select WireGuard or DNSTT from the terminal menu. WireGuard setup asks before installing packages and changing routing settings. DNSTT setup builds the official tools when requested, then prompts for the domain and forwarding destination. Do not install the DNSTT router on the old server while its existing SlowDNS service is using DNS.
 
-اختر WireGuard أو DNSTT من قائمة البروتوكولات. إعداد WireGuard يطلب تأكيدًا قبل تثبيت الحزم وتغيير إعدادات التوجيه. إعداد DNSTT يبني الأدوات الرسمية عند الطلب، ثم يطلب نطاق DNS ومسار الوجهة. لا تشغّل تثبيت موجّه DNSTT على الخادم القديم؛ خدمة SlowDNS الموجودة تستخدم مدخل DNS قائمًا.
+## Verification
 
-## التحقق
+The local tests cover WireGuard address allocation, peer configuration updates, client profiles, DNS question parsing and routing, and DNSTT account-name validation. They do not connect to a live VPS or verify an external client connection. Before production use, test WireGuard from a client and configure DNS records and test DNSTT on a separate VPS.
 
-الاختبارات المحلية تغطي اختيار عناوين WireGuard، كتابة/إزالة peer، ملف العميل، قراءة أسئلة DNS وتوجيهها، والتحقق من أسماء DNSTT. لا تتصل هذه الاختبارات بخادم فعلي ولا تثبت عمل اتصال خارجي. بعد تجهيز VPS تجريبي، يلزم اختبار اتصال WireGuard من عميل، وإعداد سجلات DNS ثم اختبار DNSTT قبل اعتبار البروتوكولين جاهزين للإنتاج.
-
-شغّل الاختبارات المحلية من مجلد المشروع:
+Run the local tests with:
 
 ```bash
 python3 -m unittest -v
 ```
 
-لا تشارك ملفات WireGuard أو مفاتيح DNSTT الخاصة؛ ملفات العملاء تحتوي مفاتيح سرية.
+Do not share WireGuard client profiles or DNSTT private keys; they contain secret key material.

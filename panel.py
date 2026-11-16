@@ -59,56 +59,56 @@ def systemd_active(service: str) -> bool:
 def protocol_state(protocol: Protocol) -> tuple[str, str]:
     if protocol.key == "wireguard":
         if not shutil.which("wg"):
-            return "غير مهيأ", "الأداة wg غير مثبتة"
+            return "Not configured", "The wg tool is not installed"
         configs = sorted(Path("/etc/wireguard").glob("*.conf")) if Path("/etc/wireguard").is_dir() else []
         if not configs:
-            return "غير مهيأ", "لا توجد ملفات /etc/wireguard/*.conf"
+            return "Not configured", "No /etc/wireguard/*.conf files found"
         active = [p.stem for p in configs if systemd_active(f"wg-quick@{p.stem}.service")]
         if active:
-            return "نشط", "واجهات WireGuard: " + ", ".join(active)
-        return "موجود", f"WireGuard مثبت؛ ملفات إعداد: {len(configs)}"
+            return "Active", "WireGuard interfaces: " + ", ".join(active)
+        return "Configured", f"WireGuard is installed; configuration files: {len(configs)}"
     if protocol.key == "udp":
         if systemd_active("udp") and Path("/usr/bin/udp").is_file() and Path("/usr/bin/config.json").is_file():
-            return "نشط", "udp.service يعمل، وملف الإعداد موجود؛ إدارة الحسابات لم تُحدد بعد"
-        return "غير جاهز", "تحقق من udp.service و/usr/bin/udp وملف الإعداد"
+            return "Active", "udp.service is running and its config exists; account management is not mapped yet"
+        return "Not ready", "Check udp.service, /usr/bin/udp, and its configuration file"
     if protocol.key in {"slowdns", "dnstt"}:
         if systemd_active("kennet-dnstt-router.service"):
-            return "نشط", "موجّه DNSTT متعدد النطاقات يعمل؛ كل حساب له مفتاح وخدمة مستقلة"
+            return "Active", "The multi-domain DNSTT router is running; each account has its own key and service"
         server_up = systemd_active("server") and Path("/etc/slowdns/dnstt-server").is_file()
         client_up = systemd_active("client") and Path("/etc/slowdns/dnstt-client").is_file()
         if server_up and client_up:
-            return "نشط", "خدمتا dnstt-server وdnstt-client تعملان؛ لا توجد أداة حسابات فردية معروفة"
+            return "Active", "dnstt-server and dnstt-client are running; no per-account management tool was found"
         if server_up:
-            return "نشط جزئياً", "خدمة dnstt-server تعمل؛ تحقق من خدمة dnstt-client"
-        return "غير جاهز", protocol.note
+            return "Partially active", "dnstt-server is running; check the dnstt-client service"
+        return "Not ready", protocol.note
     if protocol.key == "tls":
         if protocol.key == "tls" and systemd_active("nginx"):
-            return "نشط جزئياً", "nginx نشط؛ لم يتم التحقق من شهادة TLS لكل inbound"
-        return "غير جاهز", protocol.note
+            return "Partially active", "nginx is running; TLS certificates for each inbound have not been verified"
+        return "Not ready", protocol.note
     if protocol.service and systemd_active(protocol.service):
         missing = [p for p in (protocol.add, protocol.delete, protocol.renew) if p and not Path(p).is_file()]
         if missing:
-            return "الخدمة نشطة", "ملفات الإدارة الناقصة: " + ", ".join(missing)
-        return "جاهز عبر أدوات الخادم", f"الخدمة {protocol.service} نشطة وأدوات الحساب موجودة"
-    return "متوقف أو غير مثبت", f"الخدمة {protocol.service} غير نشطة"
+            return "Service active", "Missing management tools: " + ", ".join(missing)
+        return "Ready via server tools", f"Service {protocol.service} is active and account tools are present"
+    return "Stopped or not installed", f"Service {protocol.service} is not active"
 
 
 def run_helper(path: str | None) -> int:
     if not path or not Path(path).is_file():
-        print("أداة الإدارة غير موجودة على هذا الخادم.")
+        print("The management tool is not installed on this server.")
         return 1
     if not os.access(path, os.X_OK):
-        print(f"الأداة غير قابلة للتنفيذ: {path}")
+        print(f"The tool is not executable: {path}")
         return 1
     try:
         return subprocess.run([path], check=False).returncode
     except OSError as exc:
-        print(f"تعذر تشغيل الأداة: {exc}")
+        print(f"Could not run the tool: {exc}")
         return 1
 
 
 def show_status() -> None:
-    print("\nحالة البروتوكولات")
+    print("\nProtocol status")
     for p in PROTOCOLS:
         state, detail = protocol_state(p)
         print(f"- {p.title}: {state} — {detail}")
@@ -117,7 +117,7 @@ def show_status() -> None:
 def choose_protocol() -> Protocol | None:
     for i, p in enumerate(PROTOCOLS, 1):
         print(f"{i}. {p.title}")
-    raw = input("اختر البروتوكول (0 للعودة): ").strip()
+    raw = input("Select a protocol (0 to return): ").strip()
     if raw == "0":
         return None
     try:
@@ -131,7 +131,7 @@ def manage_protocol(p: Protocol) -> None:
     state, detail = protocol_state(p)
     print(f"\n{p.title}: {state} — {detail}")
     if not is_root():
-        print("إدارة الحسابات تتطلب تشغيل البرنامج بصلاحية root.")
+        print("Account management requires running this program as root.")
         return
     if p.key == "wireguard":
         import wireguard_manager
@@ -141,39 +141,39 @@ def manage_protocol(p: Protocol) -> None:
         import dnstt_manager
         dnstt_manager.menu()
         return
-    actions: tuple[tuple[str, str | None], ...] = (("إنشاء حساب", p.add), ("حذف حساب", p.delete), ("تجديد حساب", p.renew))
+    actions: tuple[tuple[str, str | None], ...] = (("Create account", p.add), ("Delete account", p.delete), ("Renew account", p.renew))
     available = [(label, path) for label, path in actions if path]
     if not available:
-        print("لا توجد أداة إنشاء/حذف/تجديد موثقة لهذا البروتوكول حتى الآن.")
+        print("No documented create/delete/renew tool is available for this protocol yet.")
         return
     for i, (label, _) in enumerate(available, 1):
         print(f"{i}. {label}")
-    print("0. رجوع")
+    print("0. Return")
     try:
-        selected = int(input("اختر العملية: ").strip())
+        selected = int(input("Select an action: ").strip())
     except ValueError:
-        print("اختيار غير صالح.")
+        print("Invalid selection.")
         return
     if selected == 0:
         return
     if not 1 <= selected <= len(available):
-        print("اختيار غير صالح.")
+        print("Invalid selection.")
         return
     label, helper = available[selected - 1]
-    print(f"سيتم تمرير العملية إلى أداة الخادم: {label}.")
+    print(f"The request will be passed to the server tool: {label}.")
     run_helper(helper)
 
 
 def main() -> int:
     if not sys.platform.startswith("linux"):
-        print("هذا البرنامج مخصص للتشغيل على خادم Ubuntu/Linux.")
+        print("This program is intended for Ubuntu/Linux servers.")
         return 2
     while True:
-        print("\n=== مدير الحسابات الخاص ===")
-        print("1. حالة البروتوكولات")
-        print("2. إدارة بروتوكول")
-        print("0. خروج")
-        choice = input("اختر: ").strip()
+        print("\n=== Private Account Manager ===")
+        print("1. Protocol status")
+        print("2. Manage a protocol")
+        print("0. Exit")
+        choice = input("Select: ").strip()
         if choice == "0":
             return 0
         if choice == "1":
@@ -183,9 +183,8 @@ def main() -> int:
             if p:
                 manage_protocol(p)
         else:
-            print("اختيار غير صالح.")
+            print("Invalid selection.")
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

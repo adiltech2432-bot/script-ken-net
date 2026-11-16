@@ -23,4 +23,3 @@ if [[ -z "${SOURCE_DIR}" || ! -f "${SOURCE_DIR}/install.sh" ]]; then
   exit 1
 fi
 bash "${SOURCE_DIR}/install.sh"
-
