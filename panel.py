@@ -25,11 +25,13 @@ class Protocol:
 
 PROTOCOLS = (
     Protocol("ssh", "SSH", "ssh"),
+    Protocol("dropbear", "Dropbear", "kennet-dropbear"),
     Protocol("tls", "TLS certificates / domain", "xray", note="TLS is a certificate transport setting used by Xray accounts."),
     Protocol("vless", "VLESS", "xray"),
     Protocol("trojan", "Trojan", "xray"),
     Protocol("vmess", "VMess", "xray"),
-    Protocol("udp", "UDP tunnel", "udp", note="Active service detected; account management commands still need to be mapped."),
+    Protocol("openvpn", "OpenVPN", "openvpn-server@kennet-udp", note="OpenVPN account management is not installed yet."),
+    Protocol("udp", "UDP Custom", "udp", note="The legacy ePro UDP Custom client format has not been identified."),
     Protocol("wireguard", "WireGuard", "wg-quick", note="Detected/configured WireGuard interfaces can be inspected; peer provisioning is not yet configured."),
     Protocol("slowdns", "SlowDNS", "server", note="This server runs SlowDNS through dnstt-server; no per-user account helper was identified."),
     Protocol("dnstt", "DNSTT", "server", note="The server runs dnstt-server and dnstt-client; this appears to be the SlowDNS transport instance."),
@@ -137,6 +139,10 @@ def manage_protocol(p: Protocol) -> None:
     if p.key == "wireguard":
         import wireguard_manager
         wireguard_manager.menu()
+        return
+    if p.key == "dropbear":
+        import dropbear_manager
+        dropbear_manager.menu()
         return
     if p.key in {"slowdns", "dnstt"}:
         import dnstt_manager

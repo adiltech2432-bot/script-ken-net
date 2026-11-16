@@ -8,7 +8,7 @@ class PanelTests(unittest.TestCase):
     def test_expected_protocols_are_listed(self):
         self.assertEqual(
             {p.key for p in panel.PROTOCOLS},
-            {"ssh", "tls", "vless", "trojan", "vmess", "udp", "wireguard", "slowdns", "dnstt"},
+            {"ssh", "dropbear", "tls", "vless", "trojan", "vmess", "openvpn", "udp", "wireguard", "slowdns", "dnstt"},
         )
 
     def test_account_protocols_are_managed_by_local_manager(self):
