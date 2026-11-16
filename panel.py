@@ -33,8 +33,8 @@ PROTOCOLS = (
     Protocol("openvpn", "OpenVPN", "openvpn-server@kennet-udp", note="OpenVPN account management is not installed yet."),
     Protocol("udp", "UDP Custom", "udp", note="The legacy ePro UDP Custom client format has not been identified."),
     Protocol("wireguard", "WireGuard", "wg-quick", note="Detected/configured WireGuard interfaces can be inspected; peer provisioning is not yet configured."),
-    Protocol("slowdns", "SlowDNS", "server", note="This server runs SlowDNS through dnstt-server; no per-user account helper was identified."),
-    Protocol("dnstt", "DNSTT", "server", note="The server runs dnstt-server and dnstt-client; this appears to be the SlowDNS transport instance."),
+    Protocol("slowdns", "SlowDNS", "server", note="No SlowDNS-compatible service is configured on this VPS."),
+    Protocol("dnstt", "DNSTT", "server", note="Configure the DNSTT tools, delegated domain, DNS router, and endpoint first."),
 )
 
 

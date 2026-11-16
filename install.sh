@@ -39,4 +39,5 @@ chown root:root /usr/local/bin/kennet-panel
 chmod 0750 /usr/local/bin/kennet-panel
 
 echo "Installed. Start the terminal menu with: sudo kennet-panel"
-echo "Only WireGuard and DNSTT additions are provisioned here; existing protocol helper commands must be installed separately."
+echo "SSH, Dropbear, Xray, WireGuard, and DNSTT managers are included; configure each service from its menu."
+echo "OpenVPN, standalone WebSocket bridges, Nginx/HAProxy multiplexing, and legacy UDP Custom are not installed by this build."
