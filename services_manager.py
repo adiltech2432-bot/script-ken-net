@@ -35,6 +35,7 @@ def _run(args: list[str], input_text: str | None = None) -> str:
 def _atomic(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    original_error = "unknown APT error"
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -344,6 +345,50 @@ def configure_tls() -> None:
     acquire_tls_certificate(domain)
 
 
+def install_certbot() -> None:
+    """Install Certbot normally, with an Ubuntu-only fallback that leaves APT sources untouched."""
+    if shutil.which("certbot"):
+        return
+    try:
+        _run(["apt-get", "update"])
+        _run(["apt-get", "install", "-y", "certbot"])
+        return
+    except RuntimeError as exc:
+        original_error = str(exc)
+
+    os_release = Path("/etc/os-release")
+    if not os_release.is_file():
+        raise RuntimeError(f"Could not install Certbot using configured APT sources: {original_error}")
+    values = {}
+    for line in os_release.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value.strip().strip('"')
+    codename = values.get("VERSION_CODENAME", "")
+    if values.get("ID") != "ubuntu" or not re.fullmatch(r"[a-z]+", codename):
+        raise RuntimeError(f"Could not install Certbot using configured APT sources: {original_error}")
+
+    architecture = _run(["dpkg", "--print-architecture"])
+    archive = "https://ports.ubuntu.com/ubuntu-ports" if architecture in {"arm64", "armhf", "ppc64el", "riscv64", "s390x"} else "https://archive.ubuntu.com/ubuntu"
+    source_text = (
+        f"deb {archive} {codename} main universe\n"
+        f"deb {archive} {codename}-updates main universe\n"
+        f"deb https://security.ubuntu.com/ubuntu {codename}-security main universe\n"
+    )
+    fd, source_file = tempfile.mkstemp(prefix="kennet-ubuntu-", suffix=".list")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(source_text)
+        apt_options = ["-o", f"Dir::Etc::sourcelist={source_file}", "-o", "Dir::Etc::sourceparts=-", "-o", "APT::Get::List-Cleanup=0"]
+        print("Configured APT mirrors failed. Retrying Certbot installation against official Ubuntu archives without editing the server's APT source files.")
+        _run(["apt-get", *apt_options, "update"])
+        _run(["apt-get", *apt_options, "install", "-y", "certbot"])
+    except RuntimeError as fallback_error:
+        raise RuntimeError(f"Configured APT sources failed ({original_error}); official Ubuntu archive fallback failed ({fallback_error})") from fallback_error
+    finally:
+        Path(source_file).unlink(missing_ok=True)
+
+
 def acquire_tls_certificate(domain: str) -> None:
     try:
         addresses = sorted({item[4][0] for item in socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)})
@@ -360,7 +405,7 @@ def acquire_tls_certificate(domain: str) -> None:
     if listener.stdout.strip():
         raise RuntimeError("TCP/80 is already occupied; stop or reconfigure its service before standalone certificate issuance")
     open_ports([("tcp",80)])
-    _run(["apt-get","update"]); _run(["apt-get","install","-y","certbot"])
+    install_certbot()
     _run(["certbot","certonly","--standalone","--non-interactive","--agree-tos","--register-unsafely-without-email","--preferred-challenges","http","-d",domain])
     if shutil.which("getent") and subprocess.run(["getent", "group", "ssl-cert"], capture_output=True).returncode == 0:
         subprocess.run(["usermod", "-a", "-G", "ssl-cert", "nobody"], check=True)
