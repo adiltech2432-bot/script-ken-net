@@ -339,14 +339,14 @@ def remove_peer(interface: str, username: str) -> None:
 
 
 def menu() -> None:
+    import terminal_ui
     interface = input("WireGuard interface name [wg0]: ").strip() or "wg0"
     while True:
-        print("\n=== WIREGUARD ACCOUNT MANAGER ===")
-        print("[01] Install / configure server       [06] Create trial peer")
-        print("[02] Create peer                      [07] List accounts")
-        print("[03] Renew peer                       [08] Show connected peers")
-        print("[04] Delete peer                      [09] Peer details")
-        print("[05] Service status                   [00] Return")
+        terminal_ui.option_cards("WIREGUARD ACCOUNT MANAGER", [("01", "Install / configure server"),
+            ("02", "Create peer"), ("03", "Renew peer"), ("04", "Delete peer"),
+            ("05", "Service status"), ("06", "Create trial peer"),
+            ("07", "List accounts"), ("08", "Show connected peers"),
+            ("09", "Peer details"), ("00", "Return")])
         choice = input("Select: ").strip()
         try:
             if choice in {"0", "00"}:
@@ -366,8 +366,11 @@ def menu() -> None:
                 endpoint = input(f"Server address and port [{default_endpoint}]: ").strip() or default_endpoint
                 dns = input("DNS [1.1.1.1]: ").strip() or "1.1.1.1"
                 path = add_peer(interface, name, endpoint, dns, days=days, trial=trial)
-                print(f"Client profile created: {path}\nExpires: {(date.today() + timedelta(days=days)).isoformat()}")
-                print("Transfer this file securely; it contains the client's private key.")
+                record = list_peers()[name]
+                terminal_ui.detail_card("WIREGUARD ACCOUNT", [("Name", name), ("Interface", interface),
+                    ("Client address", record["address"]), ("Endpoint", endpoint),
+                    ("Valid until", record["expires_at"]), ("Profile file", path)],
+                    note="The profile contains the client's private key. Transfer it securely.")
             elif choice == "3":
                 name = input("Username: ").strip()
                 days = int(input("Extend validity by days [30]: ").strip() or "30")

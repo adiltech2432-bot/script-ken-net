@@ -8,7 +8,7 @@ fi
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="/opt/kennet-panel"
-REQUIRED=(panel.py services_manager.py service_catalog.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py)
+REQUIRED=(panel.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py)
 
 for file in "${REQUIRED[@]}"; do
   if [[ ! -f "${SOURCE_DIR}/${file}" ]]; then
@@ -18,7 +18,7 @@ for file in "${REQUIRED[@]}"; do
 done
 
 (cd "${SOURCE_DIR}" && python3 -m unittest -v)
-python3 -m py_compile "${SOURCE_DIR}/panel.py" "${SOURCE_DIR}/services_manager.py" "${SOURCE_DIR}/service_catalog.py" "${SOURCE_DIR}/dropbear_manager.py" "${SOURCE_DIR}/wireguard_manager.py" \
+python3 -m py_compile "${SOURCE_DIR}/panel.py" "${SOURCE_DIR}/services_manager.py" "${SOURCE_DIR}/service_catalog.py" "${SOURCE_DIR}/terminal_ui.py" "${SOURCE_DIR}/settings_manager.py" "${SOURCE_DIR}/dropbear_manager.py" "${SOURCE_DIR}/wireguard_manager.py" \
   "${SOURCE_DIR}/dnstt_manager.py" "${SOURCE_DIR}/dnstt_mux.py"
 
 install -d -o root -g root -m 0755 "${DEST_DIR}"

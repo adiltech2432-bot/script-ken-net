@@ -1,6 +1,8 @@
 # Ken-net Terminal Manager
 
-An editable English terminal manager for Ubuntu 24.04. The home screen is a colored server dashboard with system metrics, domain, account/session counts, and a two-column protocol menu.
+An editable English terminal manager for Ubuntu 24.04. The home screen is a colored server dashboard with system metrics, domain, account/session counts, and separate card menus for protocols and settings. Account creation immediately displays protocol-specific connection details.
+
+The **System settings** cards include running-service status, the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing, VPS speed test, WebSocket capability status, and confirmed VPS reboot.
 
 ## Managed features
 

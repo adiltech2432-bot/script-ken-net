@@ -87,11 +87,9 @@ def dashboard() -> None:
     except (ImportError, OSError, ValueError):
         accounts, domain = {}, "domain not configured"
     cpu, ram, disk_uptime = _system_metrics()
+    import terminal_ui
     width = max(58, min(shutil.get_terminal_size((80, 24)).columns, 100))
-    cyan, blue, yellow, reset = "\033[96m", "\033[94m", "\033[93m", "\033[0m"
-    print("\n" + cyan + "╔" + "═" * (width - 2) + "╗")
-    print("║" + "KEN-NET  •  SERVER MANAGEMENT PANEL".center(width - 2) + "║")
-    print("╚" + "═" * (width - 2) + "╝" + reset)
+    terminal_ui.heading("KEN-NET  •  SERVER MANAGEMENT PANEL")
     print(f"{cpu}   {ram}   {disk_uptime}")
     print(f"DOMAIN  {domain}")
     totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan")}
@@ -126,15 +124,12 @@ def dashboard() -> None:
         print(f"  {label:<8} {online:>3} {qualifier:<8} • {totals.get(key, 0):>3} accounts")
     print(f"  {'WIREGUARD':<8} {wg_online:>3} peers    • {wg_total:>3} accounts")
     print(f"  {'DNSTT':<8} {dnstt_ready:>3} services • {dnstt_total:>3} endpoints")
-    print(blue + "\n── ACCOUNTS ──────────────────────────────────────────────────────────" + reset)
-    left = (("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"), ("05", "DROPBEAR"), ("06", "OPENVPN"))
-    right = (("07", "UDP CUSTOM"), ("08", "WIREGUARD"), ("09", "SLOWDNS"), ("10", "DNSTT"), ("11", "TLS / DOMAIN"))
-    for index in range(max(len(left), len(right))):
-        first = f"[{left[index][0]}] {left[index][1]}" if index < len(left) else ""
-        second = f"[{right[index][0]}] {right[index][1]}" if index < len(right) else ""
-        print(f"  {first:<28} {second}")
-    print(yellow + "── SYSTEM & TOOLS ────────────────────────────────────────────────────" + reset)
-    print("  [12] PROTOCOL STATUS       [13] SERVICES / PORTS       [0] EXIT")
+    protocol_options = [("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"),
+                        ("05", "DROPBEAR"), ("06", "OPENVPN"), ("07", "UDP CUSTOM"),
+                        ("08", "WIREGUARD"), ("09", "SLOWDNS"), ("10", "DNSTT")]
+    terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options, columns=2)
+    terminal_ui.option_cards("SETTINGS & TOOLS", [("11", "System settings"), ("12", "Protocol status"),
+                           ("13", "Services / ports"), ("0", "Exit")], columns=2, color=terminal_ui.YELLOW)
     print("\n" + "─ " * (width // 2))
     print("Select option [0-13]: ", end="", flush=True)
 
@@ -294,8 +289,11 @@ def main() -> int:
         elif choice == "13":
             import service_catalog
             service_catalog.show()
-        elif choice.isdigit() and 1 <= int(choice) <= 11:
-            ordered = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
+        elif choice == "11":
+            import settings_manager
+            settings_manager.menu()
+        elif choice.isdigit() and 1 <= int(choice) <= 10:
+            ordered = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt")
             p = next(item for item in PROTOCOLS if item.key == ordered[int(choice) - 1])
             manage_protocol(p)
         else:

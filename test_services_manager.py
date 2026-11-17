@@ -1,6 +1,8 @@
 import base64
 import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 import services_manager as services
 from unittest.mock import patch
@@ -39,6 +41,16 @@ class ServiceManagerTests(unittest.TestCase):
             services.acquire_tls_certificate("vpn.example.com")
         certbot = [call.args[0] for call in command.mock_calls]
         self.assertTrue(any("--register-unsafely-without-email" in args for args in certbot))
+
+    def test_created_xray_account_prints_protocol_specific_details_and_link(self):
+        output = StringIO()
+        with patch.object(services, "state", return_value={"domain": "vpn.example.com"}), redirect_stdout(output):
+            services.show_created_account("vless", "alice", "uuid-123", 30)
+        text = output.getvalue()
+        self.assertIn("VLESS ACCOUNT", text)
+        self.assertIn("Port TLS", text)
+        self.assertIn("443/TCP", text)
+        self.assertIn("vless://uuid-123@vpn.example.com:443", text)
 
 
 if __name__ == "__main__":

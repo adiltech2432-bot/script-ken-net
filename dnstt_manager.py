@@ -379,14 +379,13 @@ def remove_account(username: str) -> None:
 
 
 def menu() -> None:
+    import terminal_ui
     while True:
-        print("\nDNSTT — a separate domain and service for each name (DNSTT does not authenticate clients)")
-        print("[01] Install tools / router           [06] Delete endpoint")
-        print("[02] Configure DNS domain             [07] Create trial endpoint")
-        print("[03] Router status                    [08] List endpoints")
-        print("[04] Create endpoint                  [09] Endpoint status")
-        print("[05] Renew endpoint                   [10] Endpoint details")
-        print("[00] Return")
+        terminal_ui.option_cards("DNSTT ACCOUNT MANAGER", [("01", "Install tools / router"),
+            ("02", "Configure DNS domain"), ("03", "Router status"),
+            ("04", "Create endpoint"), ("05", "Renew endpoint"), ("06", "Delete endpoint"),
+            ("07", "Create trial endpoint"), ("08", "List endpoints"),
+            ("09", "Endpoint status"), ("10", "Endpoint details"), ("00", "Return")])
         choice = input("Select: ").strip()
         try:
             if choice in {"0", "00"}:
@@ -413,8 +412,15 @@ def menu() -> None:
                     print("Invalid port")
                     continue
                 profile, records = add_account(username, port, days, trial=trial)
-                print(f"Profile created: {profile}\nExpires: {(date.today() + timedelta(days=days)).isoformat()}\n{records}")
-                print("The account directory contains the server private key; do not share it with the client.")
+                account = account_details(username)
+                client_text = profile.read_text(encoding="utf-8")
+                pubkey = next((line.partition(":")[2].strip() for line in client_text.splitlines() if line.startswith("Server public key:")), "")
+                command = next((line for line in client_text.splitlines() if line.startswith("dnstt-client ")), "")
+                terminal_ui.detail_card("DNSTT ACCOUNT", [("Username", username), ("Endpoint", account["domain"]),
+                    ("DNS resolver", next((line.partition(":")[2].strip() for line in client_text.splitlines() if line.startswith("Resolver:")), "")),
+                    ("Server public key", pubkey), ("Local tunnel port", port),
+                    ("Valid until", account["expires_at"]), ("Client command", command),
+                    ("Profile file", profile)], note="DNSTT does not authenticate clients; protect these connection details.\n" + records)
             elif choice == "5":
                 username = input("Username: ").strip()
                 days = int(input("Extend validity by days [30]: ").strip() or "30")

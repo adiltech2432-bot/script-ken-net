@@ -35,7 +35,6 @@ def _run(args: list[str], input_text: str | None = None) -> str:
 def _atomic(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    original_error = "unknown APT error"
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -339,26 +338,50 @@ def client_link(protocol: str, username: str, credential: str, domain: str) -> s
     return "vmess://" + base64.b64encode(raw).decode()
 
 
+def show_created_account(protocol: str, username: str, credential: str, days: int, *, trial: bool = False) -> None:
+    import terminal_ui
+    expires = (dt.date.today() + dt.timedelta(days=days)).isoformat()
+    current = state()
+    domain = current.get("domain") or "Use the VPS public IP or configured domain"
+    if protocol in {"ssh", "dropbear"}:
+        dropbear_active = subprocess.run(["systemctl", "is-active", "--quiet", "kennet-dropbear.service"], capture_output=True, check=False).returncode == 0
+        access = "22/TCP (OpenSSH)" + (", 109/TCP and 143/TCP (Dropbear)" if dropbear_active else "")
+        fields = [("Username", username), ("Password", credential), ("Host", domain),
+                  ("Access ports", access), ("Valid until", expires),
+                  ("Account type", "TRIAL" if trial else "REGULAR")]
+        terminal_ui.detail_card(f"{protocol.upper()} ACCOUNT", fields, note="Password is displayed once. Save it securely.")
+        return
+    port = XRAY_PORTS[protocol]
+    credential_label = "Password" if protocol == "trojan" else "UUID"
+    fields = [("Remarks", username), ("Host server", domain), ("Port TLS", f"{port}/TCP"),
+              ("Network", "TCP"), ("Security", "TLS"), (credential_label, credential),
+              ("Valid until", expires), ("Account type", "TRIAL" if trial else "REGULAR"),
+              ("Client link", client_link(protocol, username, credential, current.get("domain", "")))]
+    terminal_ui.detail_card(f"{protocol.upper()} ACCOUNT", fields)
+
+
 def configure_tls() -> None:
     data=state(); domain=data.get("domain", "")
     if not DOMAIN_RE.fullmatch(domain): raise ValueError("Set the domain first")
     acquire_tls_certificate(domain)
 
 
-def install_certbot() -> None:
-    """Install Certbot normally, with an Ubuntu-only fallback that leaves APT sources untouched."""
-    if shutil.which("certbot"):
+def install_ubuntu_package(package: str) -> None:
+    """Install an Ubuntu package normally, falling back to official archives without changing APT sources."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package):
+        raise ValueError("Invalid Ubuntu package name")
+    if shutil.which(package):
         return
     try:
         _run(["apt-get", "update"])
-        _run(["apt-get", "install", "-y", "certbot"])
+        _run(["apt-get", "install", "-y", package])
         return
     except RuntimeError as exc:
         original_error = str(exc)
 
     os_release = Path("/etc/os-release")
     if not os_release.is_file():
-        raise RuntimeError(f"Could not install Certbot using configured APT sources: {original_error}")
+        raise RuntimeError(f"Could not install {package} using configured APT sources: {original_error}")
     values = {}
     for line in os_release.read_text(encoding="utf-8").splitlines():
         if "=" in line:
@@ -366,7 +389,7 @@ def install_certbot() -> None:
             values[key] = value.strip().strip('"')
     codename = values.get("VERSION_CODENAME", "")
     if values.get("ID") != "ubuntu" or not re.fullmatch(r"[a-z]+", codename):
-        raise RuntimeError(f"Could not install Certbot using configured APT sources: {original_error}")
+        raise RuntimeError(f"Could not install {package} using configured APT sources: {original_error}")
 
     architecture = _run(["dpkg", "--print-architecture"])
     archive = "https://ports.ubuntu.com/ubuntu-ports" if architecture in {"arm64", "armhf", "ppc64el", "riscv64", "s390x"} else "https://archive.ubuntu.com/ubuntu"
@@ -380,13 +403,17 @@ def install_certbot() -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(source_text)
         apt_options = ["-o", f"Dir::Etc::sourcelist={source_file}", "-o", "Dir::Etc::sourceparts=-", "-o", "APT::Get::List-Cleanup=0"]
-        print("Configured APT mirrors failed. Retrying Certbot installation against official Ubuntu archives without editing the server's APT source files.")
+        print(f"Configured APT mirrors failed. Retrying {package} installation against official Ubuntu archives without editing the server's APT source files.")
         _run(["apt-get", *apt_options, "update"])
-        _run(["apt-get", *apt_options, "install", "-y", "certbot"])
+        _run(["apt-get", *apt_options, "install", "-y", package])
     except RuntimeError as fallback_error:
-        raise RuntimeError(f"Configured APT sources failed ({original_error}); official Ubuntu archive fallback failed ({fallback_error})") from fallback_error
+        raise RuntimeError(f"Configured APT sources failed ({original_error}); official Ubuntu archive fallback for {package} failed ({fallback_error})") from fallback_error
     finally:
         Path(source_file).unlink(missing_ok=True)
+
+
+def install_certbot() -> None:
+    install_ubuntu_package("certbot")
 
 
 def acquire_tls_certificate(domain: str) -> None:
@@ -426,11 +453,10 @@ def menu(protocol: str) -> None:
         account_menu(protocol)
         return
     while True:
-        print(f"\n=== {protocol.upper()} account manager ===")
+        import terminal_ui
         if protocol == "tls":
-            print("1. Set shared domain")
-            print("2. Request / renew TLS certificate")
-            print("0. Return")
+            terminal_ui.option_cards("TLS CERTIFICATE / DOMAIN", [("1", "Set domain + request certificate"),
+                ("2", "Request / renew certificate"), ("0", "Return")])
             choice=input("Select: ").strip()
             try:
                 if choice=="0": return
@@ -439,6 +465,7 @@ def menu(protocol: str) -> None:
                 else: print("Invalid selection")
             except (OSError,ValueError,RuntimeError,json.JSONDecodeError,subprocess.CalledProcessError) as exc: print(f"Operation failed: {exc}")
             continue
+        terminal_ui.heading(f"{protocol.upper()} ACCOUNT MANAGER")
         print("1. Install / configure service")
         print("2. Set shared domain")
         if protocol in {"vless","vmess","trojan"}: print("3. Check TLS certificate"); print("4. Create account"); print("5. List accounts"); print("6. Delete account")
@@ -474,15 +501,15 @@ def menu(protocol: str) -> None:
 
 
 def account_menu(protocol: str) -> None:
+    import terminal_ui
     titles = {"ssh": "SSH VIP", "vless": "VLESS", "vmess": "VMESS", "trojan": "TROJAN"}
     title = titles[protocol]
     while True:
-        print(f"\n=== {title} ACCOUNT MANAGER ===")
-        print("[01] Install / configure service       [06] Create trial account")
-        print("[02] Create account                   [07] List accounts")
-        print("[03] Renew account                    [08] Show connected sessions")
-        print("[04] Delete account                   [09] Set domain / TLS certificate")
-        print("[05] Show account details              [00] Return")
+        terminal_ui.option_cards(f"{title} ACCOUNT MANAGER", [("01", "Install / configure service"),
+            ("02", "Create account"), ("03", "Renew account"), ("04", "Delete account"),
+            ("05", "Show account details"), ("06", "Create trial account"),
+            ("07", "List accounts"), ("08", "Show connected sessions"),
+            ("09", "Set domain / TLS certificate"), ("00", "Return")])
         choice = input("Select option [00-09]: ").strip()
         try:
             if choice in {"0", "00"}:
@@ -503,11 +530,10 @@ def account_menu(protocol: str) -> None:
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 if protocol == "ssh":
                     password = ssh_add(username, days, trial=trial)
-                    print(f"Account: {username}\nPassword (shown once): {password}\nExpires: {(dt.date.today()+dt.timedelta(days=days)).isoformat()}")
+                    show_created_account(protocol, username, password, days, trial=trial)
                 else:
                     credential = xray_add(protocol, username, days, trial=trial)
-                    print(f"Account: {username}\nExpires: {(dt.date.today()+dt.timedelta(days=days)).isoformat()}")
-                    print(client_link(protocol, username, credential, state().get("domain", "")))
+                    show_created_account(protocol, username, credential, days, trial=trial)
             elif choice == "3":
                 username = input("Username: ").strip()
                 days = int(input("Extend validity by days [30]: ").strip() or "30")
