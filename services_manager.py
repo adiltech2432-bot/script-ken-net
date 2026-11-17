@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import base64
+import getpass
 import ipaddress
 import json
 import os
@@ -107,12 +108,76 @@ def install_ssh() -> None:
     open_ports([("tcp", 22)])
 
 
-def ssh_add(username: str, days: int, *, trial: bool = False) -> str:
+def install_ssh_ip_limit() -> None:
+    """Install a fail-open PAM hook that enforces distinct remote IP limits."""
+    source = Path(__file__).resolve().with_name("ssh_ip_limit.py")
+    if not source.is_file():
+        raise FileNotFoundError(f"SSH IP-limit helper is missing: {source}")
+    pam_modules = list(Path("/usr/lib").glob("*/security/pam_exec.so")) + list(Path("/lib").glob("*/security/pam_exec.so"))
+    if not pam_modules:
+        raise RuntimeError("pam_exec.so is unavailable; cannot safely enable SSH IP limits")
+    target = Path("/usr/local/lib/kennet-panel/ssh_ip_limit.py")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _atomic(target, source.read_text(encoding="utf-8"), 0o755)
+
+    pam_file = Path("/etc/pam.d/sshd")
+    if not pam_file.is_file():
+        raise FileNotFoundError("/etc/pam.d/sshd is missing")
+    original_pam = pam_file.read_text(encoding="utf-8")
+    marker = "# BEGIN KEN-NET SSH DISTINCT-IP LIMIT"
+    end_marker = "# END KEN-NET SSH DISTINCT-IP LIMIT"
+    managed = f"{marker}\naccount requisite pam_exec.so quiet {target}\n{end_marker}"
+    if marker in original_pam and end_marker in original_pam:
+        before, rest = original_pam.split(marker, 1)
+        _old, after = rest.split(end_marker, 1)
+        updated_pam = before.rstrip() + "\n" + managed + after
+    else:
+        include = re.search(r"(?m)^\s*@include\s+common-account\s*$", original_pam)
+        if include:
+            updated_pam = original_pam[:include.start()] + managed + "\n" + original_pam[include.start():]
+        else:
+            account_line = re.search(r"(?m)^\s*account\s+", original_pam)
+            if account_line:
+                updated_pam = original_pam[:account_line.start()] + managed + "\n" + original_pam[account_line.start():]
+            else:
+                updated_pam = original_pam.rstrip() + "\n" + managed + "\n"
+
+    pam_exec = Path("/etc/ssh/sshd_config.d/00-kennet-ip-limit.conf")
+    original_ssh = pam_exec.read_text(encoding="utf-8") if pam_exec.exists() else None
+    try:
+        _atomic(pam_file, updated_pam, 0o644)
+        effective = subprocess.run(["sshd", "-T"], capture_output=True, text=True, check=False)
+        if effective.returncode:
+            raise RuntimeError(effective.stderr.strip() or "Could not inspect sshd configuration")
+        if "usepam yes" not in effective.stdout.lower():
+            _atomic(pam_exec, "UsePAM yes\n", 0o644)
+            _run(["sshd", "-t"])
+            verified = subprocess.run(["sshd", "-T"], capture_output=True, text=True, check=False)
+            if verified.returncode or "usepam yes" not in verified.stdout.lower():
+                raise RuntimeError("SSH IP limits require UsePAM yes, but the effective SSH configuration did not enable it")
+            _run(["systemctl", "restart", "ssh"])
+    except Exception:
+        _atomic(pam_file, original_pam, 0o644)
+        if original_ssh is None:
+            pam_exec.unlink(missing_ok=True)
+        else:
+            _atomic(pam_exec, original_ssh, 0o644)
+        raise
+
+
+def ssh_add(username: str, days: int, *, trial: bool = False,
+            password: str | None = None, max_ips: int = 0) -> str:
     if not NAME_RE.fullmatch(username) or not 1 <= days <= 3650:
         raise ValueError("Use a 3-32 character username and expiry from 1 to 3650 days")
+    if not 0 <= int(max_ips) <= 128:
+        raise ValueError("Allowed IP count must be from 0 (unlimited) to 128")
+    if password is not None and (len(password) < 8 or any(char in password for char in "\r\n:")):
+        raise ValueError("Password must be at least 8 characters and contain no line breaks or ':'")
     if subprocess.run(["id", "-u", username], capture_output=True).returncode == 0:
         raise ValueError("Username already exists")
-    password = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
+    if max_ips:
+        install_ssh_ip_limit()
+    password = password or "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
     expiry = (dt.date.today() + dt.timedelta(days=days)).isoformat()
     _run(["useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", expiry, username])
     try:
@@ -121,7 +186,8 @@ def ssh_add(username: str, days: int, *, trial: bool = False) -> str:
         subprocess.run(["userdel", "-r", username], capture_output=True)
         raise
     data = state()
-    data["accounts"][username] = {"protocol": "ssh", "expires_at": (dt.date.today() + dt.timedelta(days=days)).isoformat(), "trial": trial}
+    data["accounts"][username] = {"protocol": "ssh", "expires_at": expiry,
+                                  "trial": trial, "max_ips": int(max_ips)}
     _atomic(STATE, json.dumps(data, indent=2) + "\n")
     install_expiry_timer()
     return password
@@ -191,6 +257,98 @@ def ssh_renew(username: str, days: int) -> None:
     _run(["chage","-E",expiry,username])
     data=state(); data["accounts"][username]["expires_at"]=expiry; data["accounts"][username]["trial"]=False
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
+
+
+def _server_public_ip() -> str:
+    if shutil.which("curl"):
+        result = subprocess.run(["curl", "-4fsS", "--max-time", "3", "https://api.ipify.org"],
+                                capture_output=True, text=True, check=False)
+        if result.returncode == 0 and re.fullmatch(r"[0-9.]+", result.stdout.strip()):
+            return result.stdout.strip()
+    result = subprocess.run(["ip", "-o", "-4", "addr", "show", "scope", "global"],
+                            capture_output=True, text=True, check=False)
+    match = re.search(r"\binet\s+([0-9.]+)/", result.stdout)
+    return match.group(1) if match else "Unknown"
+
+
+def _ssh_account_fields(username: str, record: dict, password: str | None = None) -> list[tuple[str, object]]:
+    """Return the SSH account fields, showing only services actually configured here."""
+    server_ip = _server_public_ip()
+    domain = state().get("domain") or server_ip
+    expiry = record.get("expires_at", "unknown")
+    try:
+        parsed = dt.date.fromisoformat(expiry)
+        expiry = parsed.strftime("%b %d, %Y")
+    except (TypeError, ValueError):
+        pass
+    ssh_service = subprocess.run(["systemctl", "is-active", "--quiet", "ssh.service"], check=False).returncode == 0
+    try:
+        sshd = subprocess.run(["sshd", "-T"], capture_output=True, text=True, check=False)
+        ssh_ports = (", ".join(re.findall(r"(?m)^port\s+(\d+)$", sshd.stdout)) or "22/TCP") if ssh_service else "Not active"
+    except OSError:
+        ssh_ports = "22/TCP" if ssh_service else "Not active"
+    dropbear = subprocess.run(["systemctl", "is-active", "--quiet", "kennet-dropbear.service"], check=False).returncode == 0
+    try:
+        import gateway_manager
+        gateway_ready = gateway_manager.is_ready()[0]
+    except (ImportError, OSError, ValueError):
+        gateway_ready = False
+    try:
+        import udp_custom_manager
+        udp_ready = udp_custom_manager.ready()[0]
+    except (ImportError, OSError, ValueError, RuntimeError):
+        udp_ready = False
+    try:
+        import dnstt_manager
+        dns_config = json.loads(dnstt_manager.CONFIG.read_text(encoding="utf-8"))
+        dnstt_host = dns_config.get("nameserver_host", "Not configured")
+        key_files = list(Path(dnstt_manager.ACCOUNT_DIR).glob("*/server.pub"))
+        dns_public_key = key_files[0].read_text(encoding="utf-8").strip() if key_files else "Not configured"
+    except (ImportError, OSError, ValueError, json.JSONDecodeError):
+        dnstt_host = dns_public_key = "Not configured"
+    ovpn_tcp = subprocess.run(["systemctl", "is-active", "--quiet", "openvpn-server@server-tcp.service"], check=False).returncode == 0
+    ovpn_udp = subprocess.run(["systemctl", "is-active", "--quiet", "openvpn-server@server-udp.service"], check=False).returncode == 0
+    squid = subprocess.run(["systemctl", "is-active", "--quiet", "squid.service"], check=False).returncode == 0
+    badvpn = [str(port) for unit, port in (("badvpn1.service", 7100), ("badvpn2.service", 7200), ("badvpn3.service", 7300))
+              if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0]
+    return [
+        ("Username", username),
+        ("Password", password if password is not None else "Not retrievable after creation; renew/reset it"),
+        ("IP", server_ip),
+        ("Host", domain),
+        ("Host SlowDNS", "Not configured"),
+        ("DNSTT nameserver", dnstt_host),
+        ("Location", state().get("location") or "Not configured"),
+        ("Port OpenSSH", ssh_ports),
+        ("Port UDP SSH", "Not configured"),
+        ("Port Dropbear", "109, 143/TCP" if dropbear else "Not installed"),
+        ("Port Dropbear WS", "443, 109/TCP" if dropbear and gateway_ready else "Not configured"),
+        ("Port SSH WS SSL", "443/TCP" if gateway_ready else "Not configured"),
+        ("Port SSH WS", "80/TCP" if gateway_ready else "Not configured"),
+        ("Port SSL/TLS", "443/TCP" if gateway_ready else "Not configured"),
+        ("Port OpenVPN WS SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
+        ("Port OpenVPN SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
+        ("Port OpenVPN TCP", "443, 1194/TCP" if ovpn_tcp else "Not installed"),
+        ("Port OpenVPN UDP", "2200/UDP" if ovpn_udp else "Not installed"),
+        ("Proxy Squid", "3128/TCP" if squid else "Not installed"),
+        ("BadVPN UDP", ", ".join(badvpn) if badvpn else "Not installed"),
+        ("DNSTT public key", dns_public_key),
+        ("UDP Custom", f"{domain}:1-65535@{username}:{password or '<password not retrievable>'}" if udp_ready else "Not installed"),
+        ("SSH WebSocket", f"{domain}:80@{username}:{password or '<password not retrievable>'}" if gateway_ready else "Not configured"),
+        ("Payload WSS", f"GET /ssh-ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]" if gateway_ready else "Not configured"),
+        ("Allowed IPs", "Unlimited" if not int(record.get("max_ips", 0)) else str(record.get("max_ips"))),
+        ("Expired", expiry),
+    ]
+
+
+def _prompt_ssh_password() -> str:
+    first = getpass.getpass("Password (input hidden): ")
+    second = getpass.getpass("Confirm password: ")
+    if first != second:
+        raise ValueError("Passwords do not match")
+    if len(first) < 8 or any(char in first for char in "\r\n:"):
+        raise ValueError("Use at least 8 characters; line breaks and ':' are not allowed")
+    return first
 
 
 def install_expiry_timer() -> None:
@@ -296,6 +454,21 @@ def active_connections(protocol: str) -> dict[str, int]:
             rows.update(result.stdout.splitlines())
         return {"active connections (not unique users)": len(rows)}
     raise ValueError(f"Connection counting is not implemented for {protocol}")
+
+
+def ssh_session_ips() -> dict[str, list[str]]:
+    result = subprocess.run(["who", "-u"], capture_output=True, text=True, check=False)
+    managed = set(ssh_list())
+    sessions: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in managed:
+            continue
+        match = re.search(r"\(([^()]*)\)\s*$", line)
+        host = match.group(1).strip() if match else "Unknown remote IP"
+        if host and not host.startswith(":"):
+            sessions.setdefault(parts[0], set()).add(host)
+    return {username: sorted(hosts) for username, hosts in sessions.items()}
 
 
 def xray_renew(protocol: str, username: str, days: int) -> None:
@@ -567,6 +740,9 @@ def show_account_details(protocol: str, username: str) -> None:
     import terminal_ui
     record = account_details("ssh" if protocol == "dropbear" else protocol, username)
     if protocol in {"ssh", "dropbear", "udp"}:
+        if protocol == "ssh":
+            terminal_ui.detail_card("SSH OVPN ACCOUNT", _ssh_account_fields(username, record))
+            return
         if protocol == "udp":
             port_text = "UDP destination ports 1-65535 (reserved VPN/DNS ports excluded)"
             title = "UDP CUSTOM ACCOUNT"
@@ -593,6 +769,27 @@ def show_created_account(protocol: str, username: str, credential: str, days: in
     current = state()
     domain = current.get("domain") or "Use the VPS public IP or configured domain"
     if protocol in {"ssh", "dropbear", "udp"}:
+        if protocol == "ssh":
+            ssh_host = current.get("domain") or _server_public_ip()
+            terminal_ui.detail_card("SSH OVPN ACCOUNT", _ssh_account_fields(username,
+                                    {"expires_at": expires, "trial": trial,
+                                     "max_ips": state().get("accounts", {}).get(username, {}).get("max_ips", 0)},
+                                    password=credential))
+            copy_items = [("OpenSSH command", f"ssh {username}@{ssh_host} -p 22")]
+            try:
+                import gateway_manager
+                if gateway_manager.is_ready()[0]:
+                    copy_items.append(("SSH WebSocket endpoint", f"{ssh_host}:80@{username}:{credential}"))
+            except (ImportError, OSError, ValueError):
+                pass
+            try:
+                import udp_custom_manager
+                if udp_custom_manager.ready()[0]:
+                    copy_items.append(("UDP Custom endpoint", f"{ssh_host}:1-65535@{username}:{credential}"))
+            except (ImportError, OSError, ValueError, RuntimeError):
+                pass
+            terminal_ui.copy_prompt(copy_items)
+            return
         dropbear_active = subprocess.run(["systemctl", "is-active", "--quiet", "kennet-dropbear.service"], capture_output=True, check=False).returncode == 0
         access = ("UDP Custom: UDP ports 1-65535, excluding UDP/53 and configured VPN ports" if protocol == "udp"
                   else "22/TCP (OpenSSH)" + (", 109/TCP and 143/TCP (Dropbear)" if dropbear_active else ""))
@@ -781,7 +978,12 @@ def account_menu(protocol: str) -> None:
                 username = ("trial" + secrets.token_hex(3)) if trial else input("Username: ").strip()
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 if protocol == "ssh":
-                    password = ssh_add(username, days, trial=trial)
+                    password = _prompt_ssh_password()
+                    try:
+                        max_ips = int(input("Maximum simultaneous connected IPs [1, 0=unlimited]: ").strip() or "1")
+                    except ValueError as exc:
+                        raise ValueError("Allowed IP count must be a number") from exc
+                    password = ssh_add(username, days, trial=trial, password=password, max_ips=max_ips)
                     show_created_account(protocol, username, password, days, trial=trial)
                 elif protocol == "shadowsocks":
                     credential = xray_add(protocol, username, days, trial=trial)
@@ -822,8 +1024,11 @@ def account_menu(protocol: str) -> None:
                 sessions = active_connections(protocol)
                 print(f"Registered {title} accounts ({len(names)}): " + (", ".join(names) or "none"))
                 if protocol == "ssh":
+                    ip_sessions = ssh_session_ips()
                     print("Connected sessions:")
-                    for username in names: print(f"- {username}: {sessions.get(username, 0)}")
+                    for username in names:
+                        ips = ip_sessions.get(username, [])
+                        print(f"- {username}: {sessions.get(username, 0)} session(s); IPs: {', '.join(ips) or 'none'}")
                     if not sessions: print("- none detected")
                 else:
                     print("Xray active connection total (not unique users): " + str(sessions.get("active connections (not unique users)", 0)))

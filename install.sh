@@ -8,7 +8,7 @@ fi
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="/opt/kennet-panel"
-REQUIRED=(panel.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py udp_custom_manager.py gateway_manager.py websocket_tunnel.py openvpn_manager.py)
+REQUIRED=(panel.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py udp_custom_manager.py gateway_manager.py websocket_tunnel.py openvpn_manager.py ssh_ip_limit.py)
 
 for file in "${REQUIRED[@]}"; do
   if [[ ! -f "${SOURCE_DIR}/${file}" ]]; then
@@ -20,7 +20,7 @@ done
 (cd "${SOURCE_DIR}" && python3 -m unittest -v)
 python3 -m py_compile "${SOURCE_DIR}/panel.py" "${SOURCE_DIR}/services_manager.py" "${SOURCE_DIR}/service_catalog.py" "${SOURCE_DIR}/terminal_ui.py" "${SOURCE_DIR}/settings_manager.py" "${SOURCE_DIR}/dropbear_manager.py" "${SOURCE_DIR}/wireguard_manager.py" \
   "${SOURCE_DIR}/dnstt_manager.py" "${SOURCE_DIR}/dnstt_mux.py" "${SOURCE_DIR}/udp_custom_manager.py" \
-  "${SOURCE_DIR}/gateway_manager.py" "${SOURCE_DIR}/websocket_tunnel.py" "${SOURCE_DIR}/openvpn_manager.py"
+  "${SOURCE_DIR}/gateway_manager.py" "${SOURCE_DIR}/websocket_tunnel.py" "${SOURCE_DIR}/openvpn_manager.py" "${SOURCE_DIR}/ssh_ip_limit.py"
 
 install -d -o root -g root -m 0755 "${DEST_DIR}"
 for file in "${REQUIRED[@]}"; do

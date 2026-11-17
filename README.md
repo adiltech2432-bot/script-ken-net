@@ -6,7 +6,7 @@ The **System settings** cards include running-service status, the port catalog, 
 
 ## Managed features
 
-- **SSH:** create accounts with generated passwords, renew, delete, view details, create one-day trials, list managed accounts, view connected login sessions, and automatically remove expired accounts.
+- **SSH:** create accounts with manually entered passwords and an optional maximum number of simultaneous distinct remote IPs, renew, delete, view details, create one-day trials, list managed accounts, view connected login sessions/IPs, and automatically remove expired accounts. IP limits are enforced by a managed PAM account hook for SSH logins; `0` means unlimited. Passwords are stored only as Linux password hashes and cannot be re-displayed after creation.
 - **Dropbear:** install a separate Dropbear service on TCP/143 and an internal backend on TCP/2109. HAProxy multiplexes raw SSH and WebSocket HTTP on TCP/109; manage Dropbear logins through the shared SSH account store.
 - **VLESS, VMess, Trojan, Shadowsocks:** install Xray-core; create accounts and client links, renew, delete, inspect, create one-day trials, list accounts, view aggregate established connection counts, and automatically expire accounts. TLS WebSocket and gRPC share TCP/443 through HAProxy and Nginx; VLESS/VMess cleartext WebSocket uses TCP/80. Xray listens only on loopback ports 10001–10008.
 - **Shared TCP gateway and WebSocket:** HAProxy owns public TCP/80, TCP/443, and TCP/109. It routes HTTP, TLS, raw SSH, and OpenVPN TCP handshakes; Nginx routes protocol paths to Xray and a restricted WebSocket bridge. TCP/81 exposes a simple health response. TCP/143 is direct Dropbear.
