@@ -32,6 +32,16 @@ class GatewayRenderingTests(unittest.TestCase):
     def test_udp_exclusions_preserve_other_protocol_ports(self):
         self.assertEqual(udp_custom_manager._unit_text([53, 2200, 51820]).count("--exclude 53,2200,51820"), 1)
 
+    def test_haproxy_config_merge_removes_unsupported_include_and_is_idempotent(self):
+        base = "global\n    daemon\ndefaults\n    mode http\n# Include Ken-net public listener configuration\n    .include /etc/haproxy/conf.d/*.cfg\n"
+        once = gateway_manager.merge_haproxy_config(base, gateway_manager.render_haproxy())
+        twice = gateway_manager.merge_haproxy_config(once, gateway_manager.render_haproxy())
+        self.assertNotIn(".include", twice)
+        self.assertEqual(twice.count("frontend kennet_http"), 1)
+        self.assertIn("# BEGIN KEN-NET MANAGED FRONTENDS", twice)
+        self.assertIn("# END KEN-NET MANAGED FRONTENDS", twice)
+        self.assertIn("global\n    daemon", twice)
+
 
 class WebSocketTunnelTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

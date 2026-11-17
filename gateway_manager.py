@@ -16,6 +16,8 @@ HAPROXY_CFG = Path("/etc/haproxy/conf.d/kennet-panel.cfg")
 WS_SOURCE = Path("/opt/kennet-panel/websocket_tunnel.py")
 WS_UNIT = Path("/etc/systemd/system/kennet-websocket.service")
 WS_SCRIPT = Path("/usr/local/lib/kennet-panel/websocket_tunnel.py")
+HAPROXY_BEGIN = "# BEGIN KEN-NET MANAGED FRONTENDS"
+HAPROXY_END = "# END KEN-NET MANAGED FRONTENDS"
 
 
 def render_haproxy() -> str:
@@ -70,6 +72,30 @@ backend kennet_dropbear
     mode tcp
     server dropbear 127.0.0.1:2109 check
 """
+
+
+def merge_haproxy_config(current: str, managed: str) -> str:
+    """Append our frontends to haproxy.cfg, replacing prior Ken-net content idempotently."""
+    lines = current.splitlines()
+    kept = []
+    skipping = False
+    for line in lines:
+        if line.strip() == HAPROXY_BEGIN:
+            skipping = True
+            continue
+        if skipping:
+            if line.strip() == HAPROXY_END:
+                skipping = False
+            continue
+        if line.strip() == ".include /etc/haproxy/conf.d/*.cfg":
+            continue
+        if line.strip() == "# Include Ken-net public listener configuration":
+            continue
+        kept.append(line)
+    if skipping:
+        raise RuntimeError("Unterminated Ken-net HAProxy config marker; refusing to modify it")
+    base = "\n".join(kept).rstrip()
+    return f"{base}\n\n{HAPROXY_BEGIN}\n{managed.rstrip()}\n{HAPROXY_END}\n"
 
 
 def render_nginx(domain: str, *, include_tls: bool = True) -> str:
@@ -207,19 +233,21 @@ def install() -> None:
         NGINX_LINK.unlink()
     NGINX_LINK.symlink_to(NGINX_SITE)
     HAPROXY_CFG.parent.mkdir(parents=True, exist_ok=True)
-    _atomic(HAPROXY_CFG, render_haproxy())
+    managed_config = render_haproxy()
+    _atomic(HAPROXY_CFG, managed_config)
     config = Path("/etc/haproxy/haproxy.cfg")
     current = config.read_text(encoding="utf-8") if config.exists() else ""
-    include = "\n# Include Ken-net public listener configuration\n" \
-              "    .include /etc/haproxy/conf.d/*.cfg\n"
-    if ".include /etc/haproxy/conf.d/*.cfg" not in current:
-        if "global\n" not in current or "defaults\n" not in current:
-            raise RuntimeError("Unexpected HAProxy configuration; refusing to replace it")
-        current = current.rstrip() + include
-        _atomic(config, current)
+    if "global\n" not in current or "defaults\n" not in current:
+        raise RuntimeError("Unexpected HAProxy configuration; refusing to replace it")
+    merged = merge_haproxy_config(current, managed_config)
+    _atomic(config, merged)
     # Validate both complete configs before restarting either public daemon.
-    _run(["nginx", "-t"])
-    _run(["haproxy", "-c", "-f", str(config)])
+    try:
+        _run(["nginx", "-t"])
+        _run(["haproxy", "-c", "-f", str(config)])
+    except Exception:
+        _atomic(config, current)
+        raise
     install_websocket_service()
     _run(["systemctl", "enable", "nginx.service", "haproxy.service"])
     _run(["systemctl", "restart", "nginx.service", "haproxy.service"])
