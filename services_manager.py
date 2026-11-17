@@ -320,13 +320,23 @@ def xray_install() -> None:
             raise RuntimeError((p.stderr or p.stdout).strip())
     if not XRAY_CONFIG.exists():
         _atomic(XRAY_CONFIG, json.dumps({"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"}],"routing":{"rules":[]}}, indent=2)+"\n", 0o644)
+    original = XRAY_CONFIG.read_text(encoding="utf-8")
+    config = json.loads(original)
+    migrated = _migrate_legacy_xray_inbounds(config)
+    if migrated:
+        _atomic(XRAY_CONFIG, json.dumps(config, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
     if check.returncode:
+        if migrated:
+            _atomic(XRAY_CONFIG, original, 0o644)
         raise RuntimeError((check.stderr or check.stdout or "Xray configuration validation failed").strip())
-    _run(["systemctl", "enable", "--now", "xray"])
+    _run(["systemctl", "enable", "xray"])
+    _run(["systemctl", "restart" if migrated else "start", "xray"])
     active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True, check=False)
     if active.returncode:
         raise RuntimeError("Xray was installed, but xray.service did not become active; inspect: journalctl -u xray -n 80 --no-pager")
+    if migrated:
+        print("Migrated legacy TLS accounts to the shared WebSocket/gRPC inbounds: " + ", ".join(migrated))
     print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
 
 
@@ -365,9 +375,10 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
     port = XRAY_PORTS[protocol]
     if not Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").is_file() or not Path(f"/etc/letsencrypt/live/{domain}/privkey.pem").is_file():
         raise FileNotFoundError(f"TLS certificate for {domain} is missing; request it from the TLS menu first")
-    gateway_ready = subprocess.run(["systemctl", "is-active", "--quiet", "haproxy.service"], check=False).returncode == 0
+    import gateway_manager
+    gateway_ready, gateway_detail = gateway_manager.is_ready()
     if not gateway_ready:
-        raise RuntimeError("Install the shared HAProxy/Nginx gateway from the TLS/Domain menu before creating Xray accounts")
+        raise RuntimeError("Shared HAProxy/Nginx gateway is not ready: " + gateway_detail + ". Use TLS/Domain > Request / renew certificate first")
     credential = str(uuid.uuid4()) if protocol in {"vless", "vmess"} else secrets.token_urlsafe(24)
     client = _xray_client(protocol, username, credential)
     cfg.setdefault("inbounds", [])
@@ -405,6 +416,50 @@ def xray_remove(protocol: str, username: str) -> None:
 
 def _managed_tags(protocol: str) -> set[str]:
     return {f"kennet-{protocol}-{network}" for _, network, _ in XRAY_LAYOUT[protocol]}
+
+
+def _migrate_legacy_xray_inbounds(config: dict) -> list[str]:
+    """Move this manager's old per-user TLS inbounds behind the shared TLS gateway."""
+    legacy_tag = re.compile(r"^kennet-(vless|vmess|trojan|shadowsocks)-([A-Za-z0-9_]{3,32})$")
+    clients: dict[str, list[dict]] = {protocol: [] for protocol in XRAY_LAYOUT}
+    kept = []
+    migrated = []
+    for inbound in config.get("inbounds", []):
+        match = legacy_tag.fullmatch(str(inbound.get("tag", "")))
+        if not match or inbound.get("protocol") != match.group(1):
+            kept.append(inbound)
+            continue
+        protocol, username = match.groups()
+        if inbound.get("tag") in _managed_tags(protocol):
+            kept.append(inbound)
+            continue
+        entries = (inbound.get("settings") or {}).get("clients", [])
+        if not isinstance(entries, list):
+            kept.append(inbound)
+            continue
+        valid = [dict(item) for item in entries if isinstance(item, dict) and item.get("email")]
+        if not valid:
+            kept.append(inbound)
+            continue
+        clients[protocol].extend(valid)
+        migrated.append(username)
+    if not migrated:
+        return []
+
+    config["inbounds"] = kept
+    for protocol, entries in clients.items():
+        if not entries:
+            continue
+        generated = _managed_protocol_inbounds(protocol, entries)
+        for inbound in generated:
+            existing = next((item for item in config["inbounds"] if item.get("tag") == inbound["tag"]), None)
+            if existing is None:
+                config["inbounds"].append(inbound)
+                continue
+            current = existing.setdefault("settings", {}).setdefault("clients", [])
+            known = {item.get("email") for item in current if isinstance(item, dict)}
+            current.extend(item for item in inbound["settings"]["clients"] if item.get("email") not in known)
+    return sorted(set(migrated))
 
 
 def _xray_client(protocol: str, username: str, credential: str) -> dict:

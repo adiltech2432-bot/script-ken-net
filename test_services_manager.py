@@ -16,7 +16,8 @@ class ServiceManagerTests(unittest.TestCase):
              patch("builtins.input", return_value="YES"), patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
              patch.object(services, "_run") as run, patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as subprocess_run:
             services.xray_install()
-        self.assertTrue(any(call.args[0] == ["systemctl", "enable", "--now", "xray"] for call in run.mock_calls))
+        self.assertTrue(any(call.args[0] == ["systemctl", "enable", "xray"] for call in run.mock_calls))
+        self.assertTrue(any(call.args[0] == ["systemctl", "start", "xray"] for call in run.mock_calls))
         self.assertIn("-test", subprocess_run.call_args_list[0].args[0])
 
     def test_vless_link_contains_uuid_tls_domain_and_port(self):
@@ -52,6 +53,21 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertTrue(all(item["listen"] == "127.0.0.1" for item in inbounds))
         self.assertEqual(inbounds[0]["streamSettings"]["wsSettings"]["path"], "/vless")
         self.assertEqual(inbounds[1]["streamSettings"]["grpcSettings"]["serviceName"], "vless-grpc")
+
+    def test_legacy_trojan_tls_account_migrates_to_shared_inbounds(self):
+        config = {"inbounds": [{
+            "tag": "kennet-trojan-ADIL", "protocol": "trojan", "port": 443,
+            "settings": {"clients": [{"password": "secret", "email": "ADIL"}]},
+            "streamSettings": {"network": "tcp", "security": "tls",
+                               "tlsSettings": {"certificates": [{"keyFile": "/etc/letsencrypt/live/x/privkey.pem"}]}},
+        }, {"tag": "external-inbound", "protocol": "socks", "port": 1080}]}
+        migrated = services._migrate_legacy_xray_inbounds(config)
+        self.assertEqual(migrated, ["ADIL"])
+        self.assertEqual([item["tag"] for item in config["inbounds"]], [
+            "external-inbound", "kennet-trojan-ws", "kennet-trojan-grpc"])
+        self.assertTrue(all(item["listen"] == "127.0.0.1" for item in config["inbounds"][1:]))
+        self.assertTrue(all(item["settings"]["clients"][0]["password"] == "secret"
+                            for item in config["inbounds"][1:]))
 
     @patch.object(services, "_run")
     @patch.object(services, "open_ports")

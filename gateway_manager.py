@@ -193,9 +193,9 @@ def install() -> None:
     domain = state.get("domain", "")
     if not domain:
         raise ValueError("Set the shared domain and install its TLS certificate first")
-    if not shutil.which("haproxy") or not shutil.which("nginx"):
-        _run(["apt-get", "update"])
-        _run(["apt-get", "install", "-y", "haproxy", "nginx"])
+    for package, executable in (("haproxy", "haproxy"), ("nginx", "nginx")):
+        if not shutil.which(executable):
+            services_manager.install_ubuntu_package(package)
     # Keep distro defaults disabled so there is a single intentional owner of 80/443.
     default_site = Path("/etc/nginx/sites-enabled/default")
     default_site.unlink(missing_ok=True)

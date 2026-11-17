@@ -198,7 +198,11 @@ def protocol_state(protocol: Protocol) -> tuple[str, str]:
                 import json
                 domain = json.loads(data_path.read_text()).get("domain", "")
                 if domain and Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").is_file():
-                    return "Configured", f"TLS certificate exists for {domain}"
+                    import gateway_manager
+                    ready, detail = gateway_manager.is_ready()
+                    if ready:
+                        return "Active", f"TLS certificate and shared gateway are active for {domain}"
+                    return "Partially configured", f"Certificate exists for {domain}; gateway is not ready: {detail}. Use TLS/Domain > Request / renew certificate"
             except (OSError, ValueError):
                 pass
         return "Not ready", "Set a domain with DNS pointing to this VPS, then request its TLS certificate"
