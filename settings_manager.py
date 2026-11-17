@@ -13,7 +13,8 @@ from pathlib import Path
 import terminal_ui
 
 RESTART_UNITS = (
-    "ssh.service", "kennet-dropbear.service", "xray.service", "nginx.service", "haproxy.service",
+    "ssh.service", "kennet-dropbear.service", "kennet-websocket.service", "kennet-udp-custom.service",
+    "xray.service", "nginx.service", "haproxy.service",
     "openvpn-server@server-tcp.service", "openvpn-server@server-udp.service", "udp.service",
     "kennet-dnstt-router.service", "server.service", "client.service", "badvpn1.service",
     "badvpn2.service", "badvpn3.service", "squid.service", "dropbear.service",
@@ -197,7 +198,7 @@ def restart_or_reboot() -> None:
 
 
 def change_ws_response() -> None:
-    print("Custom WebSocket response headers are unavailable: this build's Xray accounts use TCP+TLS and no WebSocket frontend is installed.")
+    print("WebSocket handshakes use the RFC 6455 response required by clients. The status text is not customizable because changing it would break compliant clients.")
 
 
 def menu() -> None:

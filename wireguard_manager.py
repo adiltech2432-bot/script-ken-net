@@ -169,6 +169,8 @@ def setup_server(interface: str = "wg0") -> None:
         raise ValueError("Initial setup currently supports an IPv4 tunnel address")
     if not 1 <= port <= 65535:
         raise ValueError("UDP port must be in 1..65535")
+    if port in {53, 2200}:
+        raise ValueError("Choose a WireGuard UDP port distinct from DNSTT/53 and OpenVPN/2200")
     sysctl_path = Path("/etc/sysctl.d/99-kennet-wireguard.conf")
     if sysctl_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing sysctl file: {sysctl_path}")
@@ -199,6 +201,12 @@ def setup_server(interface: str = "wg0") -> None:
     try:
         import services_manager
         services_manager.open_ports([("udp", port)])
+    except ImportError:
+        pass
+    try:
+        import udp_custom_manager
+        if udp_custom_manager.UNIT.is_file():
+            udp_custom_manager.refresh_exclusions()
     except ImportError:
         pass
 

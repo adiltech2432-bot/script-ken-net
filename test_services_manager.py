@@ -17,19 +17,32 @@ class ServiceManagerTests(unittest.TestCase):
 
     def test_trojan_link_contains_password_and_tls(self):
         link = services.client_link("trojan", "alice", "secret", "vpn.example.com")
-        self.assertTrue(link.startswith("trojan://secret@vpn.example.com:2053?"))
+        self.assertTrue(link.startswith("trojan://secret@vpn.example.com:443?"))
         self.assertIn("security=tls", link)
+        self.assertIn("type=ws", link)
 
     def test_vmess_link_is_parseable_client_json(self):
         link = services.client_link("vmess", "alice", "uuid-value", "vpn.example.com")
         data = json.loads(base64.b64decode(link.removeprefix("vmess://")))
         self.assertEqual(data["add"], "vpn.example.com")
-        self.assertEqual(data["port"], "8443")
+        self.assertEqual(data["port"], "443")
         self.assertEqual(data["id"], "uuid-value")
         self.assertEqual(data["tls"], "tls")
+        self.assertEqual(data["net"], "ws")
+        self.assertEqual(data["path"], "/vmess")
 
-    def test_protocol_ports_are_distinct(self):
-        self.assertEqual(len(set(services.XRAY_PORTS.values())), 3)
+    def test_xray_protocols_share_the_public_tls_port_and_use_distinct_local_backends(self):
+        self.assertEqual(set(services.XRAY_PORTS.values()), {443})
+        local_ports = [item[0] for layout in services.XRAY_LAYOUT.values() for item in layout]
+        self.assertEqual(len(local_ports), len(set(local_ports)))
+
+    def test_xray_shared_inbounds_use_loopback_ws_and_grpc_transports(self):
+        clients = [{"id": "id-1", "email": "alice"}]
+        inbounds = services._managed_protocol_inbounds("vless", clients)
+        self.assertEqual([item["port"] for item in inbounds], [10001, 10005])
+        self.assertTrue(all(item["listen"] == "127.0.0.1" for item in inbounds))
+        self.assertEqual(inbounds[0]["streamSettings"]["wsSettings"]["path"], "/vless")
+        self.assertEqual(inbounds[1]["streamSettings"]["grpcSettings"]["serviceName"], "vless-grpc")
 
     @patch.object(services, "_run")
     @patch.object(services, "open_ports")

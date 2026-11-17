@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Install the shared public TCP gateway used by Xray and tunnel transports."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import services_manager
+
+NGINX_SITE = Path("/etc/nginx/sites-available/kennet-panel")
+NGINX_LINK = Path("/etc/nginx/sites-enabled/kennet-panel")
+HAPROXY_CFG = Path("/etc/haproxy/conf.d/kennet-panel.cfg")
+WS_SOURCE = Path("/opt/kennet-panel/websocket_tunnel.py")
+WS_UNIT = Path("/etc/systemd/system/kennet-websocket.service")
+WS_SCRIPT = Path("/usr/local/lib/kennet-panel/websocket_tunnel.py")
+
+
+def render_haproxy() -> str:
+    """Route raw OpenVPN/SSH handshakes and TLS to Nginx without terminating TLS."""
+    return """# Managed by Ken-net. HAProxy is the only public owner of TCP/80 and TCP/443.
+frontend kennet_http
+    mode tcp
+    bind :80
+    default_backend kennet_nginx_http
+
+frontend kennet_dropbear_mux
+    mode tcp
+    bind :109
+    tcp-request inspect-delay 2s
+    acl ssh_banner payload(0,7) -m str SSH-2.0
+    acl http_request req.proto_http
+    tcp-request content accept if ssh_banner or http_request
+    use_backend kennet_nginx_http if http_request
+    default_backend kennet_dropbear
+
+frontend kennet_tls_mux
+    mode tcp
+    bind :443
+    tcp-request inspect-delay 2s
+    acl tls_client_hello req.ssl_hello_type 1
+    acl ovpn_v2 payload(0,1) -m bin 38
+    acl ovpn_v1 payload(0,1) -m bin 28
+    acl ssh_banner payload(0,7) -m str SSH-2.0
+    tcp-request content accept if tls_client_hello or ovpn_v2 or ovpn_v1 or ssh_banner
+    use_backend kennet_openvpn_tcp if ovpn_v2 or ovpn_v1
+    use_backend kennet_ssh_raw if ssh_banner
+    use_backend kennet_nginx_tls if tls_client_hello
+    default_backend kennet_nginx_tls
+
+backend kennet_nginx_http
+    mode tcp
+    server nginx_http 127.0.0.1:8080 check
+
+backend kennet_nginx_tls
+    mode tcp
+    server nginx_tls 127.0.0.1:8443 check
+
+backend kennet_openvpn_tcp
+    mode tcp
+    server openvpn_tcp 127.0.0.1:1194 check
+
+backend kennet_ssh_raw
+    mode tcp
+    server ssh 127.0.0.1:22 check
+
+backend kennet_dropbear
+    mode tcp
+    server dropbear 127.0.0.1:2109 check
+"""
+
+
+def render_nginx(domain: str, *, include_tls: bool = True) -> str:
+    if not services_manager.DOMAIN_RE.fullmatch(domain):
+        raise ValueError("Configure a valid domain and TLS certificate first")
+    cert = f"/etc/letsencrypt/live/{domain}"
+    ws_locations = {
+        "/ssh-ws": 10015,
+        "/dropbear-ws": 10015,
+        "/openvpn-ws": 10015,
+        "/vless": 10001,
+        "/vmess": 10002,
+        "/trojan-ws": 10003,
+        "/ss-ws": 10004,
+    }
+    ws = "\n".join(
+        f"    location = {path} {{\n"
+        "        proxy_pass http://127.0.0.1:" + str(port) + ";\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
+        "        proxy_set_header X-Real-Host $http_x_real_host;\n"
+        "        proxy_read_timeout 1h;\n"
+        "    }"
+        for path, port in ws_locations.items()
+    )
+    grpc_locations = "\n".join(
+        f"    location ^~ /{name}-grpc/ {{\n"
+        f"        grpc_pass grpc://127.0.0.1:{port};\n"
+        "        grpc_read_timeout 1h;\n"
+        "    }"
+        for name, port in (("vless", 10005), ("vmess", 10006), ("trojan", 10007), ("ss", 10008))
+    )
+    tls_server = f"""server {{
+    listen 127.0.0.1:8443 ssl http2;
+    server_name {domain};
+    ssl_certificate {cert}/fullchain.pem;
+    ssl_certificate_key {cert}/privkey.pem;
+{ws}
+{grpc_locations}
+    location / {{ return 404; }}
+}}
+""" if include_tls else ""
+    return f"""# Managed by Ken-net.
+server {{
+    listen 127.0.0.1:8080 http2;
+    server_name {domain};
+    location ^~ /.well-known/acme-challenge/ {{ root /var/www/letsencrypt; }}
+{ws}
+{grpc_locations}
+    location / {{ return 404; }}
+}}
+{tls_server}
+server {{
+    listen 0.0.0.0:81;
+    server_name _;
+    location / {{ return 200 'KEN-NET service gateway\\n'; add_header Content-Type text/plain; }}
+}}
+"""
+
+
+def _run(args: list[str]) -> str:
+    result = subprocess.run(args, text=True, capture_output=True, check=False)
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "command failed").strip())
+    return result.stdout.strip()
+
+
+def _atomic(path: Path, text: str, mode: int = 0o644) -> None:
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except Exception:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
+def install_websocket_service(source_dir: Path | None = None) -> None:
+    if source_dir is None:
+        source_dir = Path(__file__).resolve().parent
+    source = source_dir / "websocket_tunnel.py"
+    if not source.is_file():
+        raise FileNotFoundError(f"WebSocket tunnel source is missing: {source}")
+    WS_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, WS_SCRIPT)
+    os.chmod(WS_SCRIPT, 0o755)
+    unit = """[Unit]
+Description=Ken-net restricted WebSocket TCP tunnel
+After=network-online.target ssh.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/kennet-panel/websocket_tunnel.py --listen 127.0.0.1:10015
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target
+"""
+    _atomic(WS_UNIT, unit)
+    _run(["systemctl", "daemon-reload"])
+    _run(["systemctl", "enable", "--now", "kennet-websocket.service"])
+
+
+def install() -> None:
+    """Install on a clean staging host after the shared domain certificate exists."""
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        raise RuntimeError("Run as root")
+    state = services_manager.state()
+    domain = state.get("domain", "")
+    if not domain:
+        raise ValueError("Set the shared domain and install its TLS certificate first")
+    if not shutil.which("haproxy") or not shutil.which("nginx"):
+        _run(["apt-get", "update"])
+        _run(["apt-get", "install", "-y", "haproxy", "nginx"])
+    # Keep distro defaults disabled so there is a single intentional owner of 80/443.
+    default_site = Path("/etc/nginx/sites-enabled/default")
+    default_site.unlink(missing_ok=True)
+    cert_available = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").is_file() and Path(f"/etc/letsencrypt/live/{domain}/privkey.pem").is_file()
+    site_text = render_nginx(domain, include_tls=cert_available)
+    _atomic(NGINX_SITE, site_text)
+    NGINX_LINK.parent.mkdir(parents=True, exist_ok=True)
+    if NGINX_LINK.is_symlink() or NGINX_LINK.exists():
+        NGINX_LINK.unlink()
+    NGINX_LINK.symlink_to(NGINX_SITE)
+    HAPROXY_CFG.parent.mkdir(parents=True, exist_ok=True)
+    _atomic(HAPROXY_CFG, render_haproxy())
+    config = Path("/etc/haproxy/haproxy.cfg")
+    current = config.read_text(encoding="utf-8") if config.exists() else ""
+    include = "\n# Include Ken-net public listener configuration\n" \
+              "    .include /etc/haproxy/conf.d/*.cfg\n"
+    if ".include /etc/haproxy/conf.d/*.cfg" not in current:
+        if "global\n" not in current or "defaults\n" not in current:
+            raise RuntimeError("Unexpected HAProxy configuration; refusing to replace it")
+        current = current.rstrip() + include
+        _atomic(config, current)
+    # Validate both complete configs before restarting either public daemon.
+    _run(["nginx", "-t"])
+    _run(["haproxy", "-c", "-f", str(config)])
+    install_websocket_service()
+    _run(["systemctl", "enable", "nginx.service", "haproxy.service"])
+    _run(["systemctl", "restart", "nginx.service", "haproxy.service"])
+    services_manager.open_ports([("tcp", 80), ("tcp", 81), ("tcp", 443)])
+
+
+def is_ready() -> tuple[bool, str]:
+    missing = [unit for unit in ("haproxy", "nginx", "kennet-websocket")
+               if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode]
+    ports = {80, 443, 8080, 8443, 10015}
+    if missing:
+        return False, "Inactive gateway services: " + ", ".join(missing)
+    listeners = subprocess.run(["ss", "-Hlnt"], text=True, capture_output=True, check=False).stdout
+    missing_ports = [p for p in ports if not any(line.split()[3].endswith(f":{p}") for line in listeners.splitlines() if len(line.split()) > 3)]
+    if missing_ports:
+        return False, "Expected listeners missing: " + ", ".join(map(str, sorted(missing_ports)))
+    return True, "HAProxy/Nginx/WebSocket gateway services and expected listeners are active"

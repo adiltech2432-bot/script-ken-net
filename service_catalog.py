@@ -1,29 +1,36 @@
-"""Reference service and listener matrix from the requested legacy panel layout."""
+"""Implemented listener plan and intentional shared-port routing."""
 
 from __future__ import annotations
 
 SERVICES = (
-    ("Dropbear", "tcp", (109, 143), "SSH-compatible account backend; avoid binding 443 directly"),
-    ("Dropbear WebSocket", "tcp", (109, 443), "WebSocket access needs an HTTP bridge in front of Dropbear"),
-    ("SSH WebSocket", "tcp", (80, 443), "Requires an HTTP WebSocket bridge and TLS certificate on 443"),
-    ("OpenVPN TCP", "tcp", (443, 1194), "TCP/1194 is direct; TCP/443 needs compatible TLS demultiplexing"),
-    ("OpenVPN", "udp", (2200,), "UDP profile"),
-    ("OpenVPN SSL / WebSocket", "tcp", (443,), "Shares the TLS front door; requires a compatible WebSocket bridge"),
-    ("Nginx WebSocket / Web", "tcp", (80, 81, 443), "Port 81 must not be exposed unless an authenticated admin site uses it"),
-    ("HAProxy", "tcp", (80, 443), "Must be the only public listener on each bound address and port"),
-    ("VLESS TLS / WebSocket / gRPC", "tcp", (443,), "Xray backends need a TLS/SNI or HTTP path multiplexer to share 443"),
-    ("VMess TLS / WebSocket / gRPC", "tcp", (443,), "Xray backends need a TLS/SNI or HTTP path multiplexer to share 443"),
-    ("VLESS / VMess without TLS", "tcp", (80,), "Cleartext; use only behind an intentional HTTP proxy route"),
-    ("Trojan WebSocket / gRPC", "tcp", (443,), "Xray backends need an HTTP/TLS multiplexer to share 443"),
-    ("Shadowsocks WebSocket / gRPC", "tcp", (443,), "Xray stream transports need an HTTP/TLS multiplexer to share 443"),
-    ("BadVPN UDP gateway", "udp", (7100, 7200, 7300), "Optional UDP-over-TCP gateway; not a standalone authenticated VPN account protocol"),
-    ("DNSTT / SlowDNS", "udp", (53,), "Requires delegated DNS zone and an authoritative DNS route"),
+    ("OpenSSH", "tcp", (22,), "Direct SSH login and SSH account backend"),
+    ("UDP Custom", "udp", (1, 65535), "ePro UDP-Custom DNAT range; excludes UDP/53, UDP/2200 and the configured WireGuard port"),
+    ("Dropbear", "tcp", (109, 143), "TCP/109 is HAProxy-multiplexed; TCP/143 is direct"),
+    ("Dropbear WebSocket", "tcp", (109, 443), "WS path /dropbear-ws on shared TCP/109 and TLS/443 front doors"),
+    ("SSH WebSocket", "tcp", (80, 443), "WS path /ssh-ws through Nginx and the local WebSocket bridge"),
+    ("OpenVPN SSL", "tcp", (443,), "OpenVPN control packets are identified by HAProxy on shared TCP/443"),
+    ("OpenVPN WebSocket SSL", "tcp", (443,), "WS path /openvpn-ws, then local bridge to OpenVPN TCP/1194"),
+    ("OpenVPN TCP", "tcp", (443, 1194), "TCP/1194 direct; TCP/443 via HAProxy packet demultiplexing"),
+    ("OpenVPN UDP", "udp", (2200,), "Dedicated UDP listener"),
+    ("Nginx Webserver", "tcp", (80, 81, 443), "Nginx is bound to loopback on gateway ports; TCP/81 is public health page"),
+    ("HAProxy Loadbalancer", "tcp", (80, 443), "Sole public TCP owner for HTTP/TLS and multiplexed backends"),
+    ("Xray VMess TLS / WS / gRPC", "tcp", (443,), "TLS WebSocket /vmess and gRPC /vmess-grpc through Nginx"),
+    ("Xray VMess None TLS", "tcp", (80,), "Cleartext WebSocket /vmess through HTTP frontend"),
+    ("Xray VLESS TLS / WS / gRPC", "tcp", (443,), "TLS WebSocket /vless and gRPC /vless-grpc through Nginx"),
+    ("Xray VLESS None TLS", "tcp", (80,), "Cleartext WebSocket /vless through HTTP frontend"),
+    ("Trojan WS / gRPC", "tcp", (443,), "TLS WebSocket /trojan-ws and gRPC /trojan-grpc through Nginx"),
+    ("Shadowsocks WS / gRPC", "tcp", (443,), "TLS WebSocket /ss-ws and gRPC /ss-grpc through Nginx"),
+    ("WireGuard", "udp", (51820,), "Default; configured port is reserved from UDP-Custom's broad NAT rule"),
+    ("DNSTT / SlowDNS", "udp", (53,), "DNSTT router uses delegated DNS zone and per-endpoint server keys"),
+    ("WebSocket bridge", "tcp", (10015,), "Loopback-only backend; not a public listener"),
 )
 
 
 def port_owners() -> dict[tuple[str, int], list[str]]:
     owners: dict[tuple[str, int], list[str]] = {}
     for name, proto, ports, _ in SERVICES:
+        if name == "UDP Custom":
+            continue  # Range represented separately; exclusions are described above.
         for port in ports:
             owners.setdefault((proto, port), []).append(name)
     return owners
@@ -34,14 +41,13 @@ def conflicts() -> dict[tuple[str, int], list[str]]:
 
 
 def show() -> None:
-    print("\nRequested service and port plan")
+    print("\nImplemented service and port plan")
     for name, proto, ports, note in SERVICES:
-        ports_text = ", ".join(map(str, ports))
-        print(f"- {name:<34} {proto.upper():<4} {ports_text:<18} {note}")
+        ports_text = "1–65535 (with listed exclusions)" if name == "UDP Custom" else ", ".join(map(str, ports))
+        print(f"- {name:<34} {proto.upper():<4} {ports_text:<30} {note}")
     shared = conflicts()
     if shared:
-        print("\nShared listener ports require a compatible multiplexer; daemons cannot all bind these ports independently:")
+        print("\nIntentional shared listeners are routed by HAProxy/Nginx/WebSocket path:")
         for (proto, port), owners in sorted(shared.items()):
             print(f"- {proto.upper()}/{port}: {', '.join(dict.fromkeys(owners))}")
-    print("\nOnly enable a port after its service is configured. Provider firewall rules must be added in the VPS control panel.")
-
+    print("\nUDP-Custom's range must exclude UDP/53, UDP/2200 and the configured WireGuard port. Provider firewall rules are separate.")

@@ -11,7 +11,7 @@ import services_manager
 
 
 def install() -> None:
-    if input("Install Dropbear on TCP/109 and TCP/143 using the existing Linux SSH accounts? Type YES: ").strip() != "YES":
+    if input("Install Dropbear on TCP/109 (shared SSH/WebSocket mux) and TCP/143 using existing Linux accounts? Type YES: ").strip() != "YES":
         return
     if not shutil.which("dropbear"):
         subprocess.run(["apt-get", "update"], check=True)
@@ -21,7 +21,7 @@ Description=Kennet Dropbear SSH service
 After=network.target ssh.service
 [Service]
 Type=simple
-ExecStart=/usr/sbin/dropbear -F -E -p 109 -p 143
+ExecStart=/usr/sbin/dropbear -F -E -p 2109 -p 143
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -35,7 +35,7 @@ WantedBy=multi-user.target
     path.write_text(unit, encoding="utf-8")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "enable", "--now", "kennet-dropbear.service"], check=True)
-    services_manager.open_ports([("tcp", 109), ("tcp", 143)])
+    services_manager.open_ports([("tcp", 109), ("tcp", 143), ("tcp", 443)])
 
 
 def menu() -> None:
@@ -52,7 +52,7 @@ def menu() -> None:
             if choice == "1": install()
             elif choice == "5":
                 result = subprocess.run(["systemctl", "is-active", "kennet-dropbear.service"], capture_output=True, text=True)
-                print("Dropbear:", result.stdout.strip() or "inactive", "(TCP/109, TCP/143)")
+                print("Dropbear:", result.stdout.strip() or "inactive", "(TCP/109 mux, TCP/143; WebSocket paths via 80/443)")
             elif choice in {"2", "6"}:
                 trial = choice == "6"
                 username = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()

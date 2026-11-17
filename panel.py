@@ -30,14 +30,15 @@ PROTOCOLS = (
     Protocol("vless", "VLESS", "xray"),
     Protocol("trojan", "Trojan", "xray"),
     Protocol("vmess", "VMess", "xray"),
-    Protocol("openvpn", "OpenVPN", "openvpn-server@kennet-udp", note="OpenVPN account management is not installed yet."),
-    Protocol("udp", "UDP Custom", "udp", note="The legacy ePro UDP Custom client format has not been identified."),
-    Protocol("wireguard", "WireGuard", "wg-quick", note="Detected/configured WireGuard interfaces can be inspected; peer provisioning is not yet configured."),
+    Protocol("shadowsocks", "Shadowsocks", "xray"),
+    Protocol("openvpn", "OpenVPN", "openvpn-server@server-tcp", note="Install the certificate-based OpenVPN manager first."),
+    Protocol("udp", "UDP Custom", "kennet-udp-custom", note="Install the upstream UDP-Custom backend first."),
+    Protocol("wireguard", "WireGuard", "wg-quick"),
     Protocol("slowdns", "SlowDNS", "server", note="No SlowDNS-compatible service is configured on this VPS."),
     Protocol("dnstt", "DNSTT", "server", note="Configure the DNSTT tools, delegated domain, DNS router, and endpoint first."),
 )
 
-ACCOUNT_KEYS = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
+ACCOUNT_KEYS = ("ssh", "vmess", "vless", "trojan", "shadowsocks", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
 
 
 def _managed_accounts():
@@ -92,7 +93,7 @@ def dashboard() -> None:
     terminal_ui.heading("KEN-NET  •  SERVER MANAGEMENT PANEL")
     print(f"{cpu}   {ram}   {disk_uptime}")
     print(f"DOMAIN  {domain}")
-    totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan")}
+    totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan", "shadowsocks")}
     wg_total = dnstt_total = wg_online = dnstt_ready = 0
     try:
         import wireguard_manager
@@ -125,13 +126,14 @@ def dashboard() -> None:
     print(f"  {'WIREGUARD':<8} {wg_online:>3} peers    • {wg_total:>3} accounts")
     print(f"  {'DNSTT':<8} {dnstt_ready:>3} services • {dnstt_total:>3} endpoints")
     protocol_options = [("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"),
-                        ("05", "DROPBEAR"), ("06", "OPENVPN"), ("07", "UDP CUSTOM"),
-                        ("08", "WIREGUARD"), ("09", "SLOWDNS"), ("10", "DNSTT")]
+                        ("05", "SHADOWSOCKS"), ("06", "DROPBEAR"), ("07", "OPENVPN"),
+                        ("08", "UDP CUSTOM"), ("09", "WIREGUARD"), ("10", "SLOWDNS"),
+                        ("11", "DNSTT"), ("12", "TLS / DOMAIN")]
     terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options, columns=2)
-    terminal_ui.option_cards("SETTINGS & TOOLS", [("11", "System settings"), ("12", "Protocol status"),
-                           ("13", "Services / ports"), ("0", "Exit")], columns=2, color=terminal_ui.YELLOW)
+    terminal_ui.option_cards("SETTINGS & TOOLS", [("13", "System settings"), ("14", "Protocol status"),
+                           ("15", "Services / ports"), ("0", "Exit")], columns=2, color=terminal_ui.YELLOW)
     print("\n" + "─ " * (width // 2))
-    print("Select option [0-13]: ", end="", flush=True)
+    print("Select option [0-15]: ", end="", flush=True)
 
 
 def is_root() -> bool:
@@ -162,7 +164,23 @@ def protocol_state(protocol: Protocol) -> tuple[str, str]:
             return "Active", "WireGuard interfaces: " + ", ".join(active)
         return "Configured", f"WireGuard is installed; configuration files: {len(configs)}"
     if protocol.key == "udp":
-        return "Not ready", "UDP is a transport, not a standard account protocol; select a compatible service and client before enabling it"
+        try:
+            import udp_custom_manager
+            ready, detail = udp_custom_manager.ready()
+            return ("Active" if ready else "Not ready"), detail
+        except (ImportError, OSError, ValueError, RuntimeError):
+            return "Not ready", "UDP-Custom has not been installed and configured"
+    if protocol.key == "openvpn":
+        active = all(systemd_active(f"openvpn-server@server-{mode}.service") for mode in ("tcp", "udp"))
+        if active:
+            return "Active", "OpenVPN TCP/1194, TCP/443 multiplexed, UDP/2200"
+        return "Not ready", "Install/configure the certificate-based OpenVPN service first"
+    if protocol.key == "dropbear":
+        if systemd_active("kennet-dropbear.service") and systemd_active("haproxy.service"):
+            return "Active", "Dropbear TCP/109 via the shared SSH/WebSocket mux; TCP/143 direct"
+        if systemd_active("kennet-dropbear.service"):
+            return "Partially active", "Dropbear backend is active but the HAProxy public-port gateway is not"
+        return "Not ready", "Install Dropbear and the shared HAProxy gateway"
     if protocol.key in {"slowdns", "dnstt"}:
         if systemd_active("kennet-dnstt-router.service"):
             return "Active", "The multi-domain DNSTT router is running; each account has its own key and service"
@@ -185,6 +203,9 @@ def protocol_state(protocol: Protocol) -> tuple[str, str]:
                 pass
         return "Not ready", "Set a domain with DNS pointing to this VPS, then request its TLS certificate"
     if protocol.service and systemd_active(protocol.service):
+        if protocol.key in {"vless", "vmess", "trojan", "shadowsocks"}:
+            if not systemd_active("haproxy.service") or not systemd_active("nginx.service"):
+                return "Partially active", "Xray is running but the public TLS/WebSocket/gRPC gateway is not active"
         missing = [p for p in (protocol.add, protocol.delete, protocol.renew) if p and not Path(p).is_file()]
         if missing:
             return "Service active", "Missing management tools: " + ", ".join(missing)
@@ -244,13 +265,17 @@ def manage_protocol(p: Protocol) -> None:
         import dnstt_manager
         dnstt_manager.menu()
         return
-    if p.key in {"ssh", "tls", "vless", "vmess", "trojan"}:
+    if p.key == "udp":
+        import udp_custom_manager
+        udp_custom_manager.menu()
+        return
+    if p.key in {"ssh", "tls", "vless", "vmess", "trojan", "shadowsocks"}:
         import services_manager
         services_manager.menu(p.key)
         return
-    if p.key in {"openvpn", "udp"}:
-        print("This protocol does not yet have a real account backend in this build.")
-        print("Account create/renew/delete/details/trial/online actions are unavailable until its service is implemented.")
+    if p.key == "openvpn":
+        import openvpn_manager
+        openvpn_manager.menu()
         return
     actions: tuple[tuple[str, str | None], ...] = (("Create account", p.add), ("Delete account", p.delete), ("Renew account", p.renew))
     available = [(label, path) for label, path in actions if path]
@@ -284,16 +309,16 @@ def main() -> int:
         choice = input().strip()
         if choice == "0":
             return 0
-        if choice == "12":
+        if choice == "14":
             show_status()
-        elif choice == "13":
+        elif choice == "15":
             import service_catalog
             service_catalog.show()
-        elif choice == "11":
+        elif choice == "13":
             import settings_manager
             settings_manager.menu()
-        elif choice.isdigit() and 1 <= int(choice) <= 10:
-            ordered = ("ssh", "vmess", "vless", "trojan", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt")
+        elif choice.isdigit() and 1 <= int(choice) <= 12:
+            ordered = ("ssh", "vmess", "vless", "trojan", "shadowsocks", "dropbear", "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
             p = next(item for item in PROTOCOLS if item.key == ordered[int(choice) - 1])
             manage_protocol(p)
         else:

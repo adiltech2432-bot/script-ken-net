@@ -7,24 +7,27 @@ The **System settings** cards include running-service status, the port catalog, 
 ## Managed features
 
 - **SSH:** create accounts with generated passwords, renew, delete, view details, create one-day trials, list managed accounts, view connected login sessions, and automatically remove expired accounts.
-- **Dropbear:** install a separate Dropbear service on TCP/109 and TCP/143 and manage accounts through the shared SSH account store.
-- **VLESS, VMess, Trojan:** install Xray-core; create TLS accounts, print client links, renew, delete, view details, create one-day trials, list accounts, view aggregate established connection counts, and automatically expire accounts. Config changes are checked before restarting Xray. Default ports are TCP/443, TCP/8443, and TCP/2053.
-- **TLS/domain:** setting a domain immediately checks DNS and requests/installs a Let's Encrypt certificate using Certbot's no-email registration mode. The DNS A/AAAA record must already point to this VPS. TCP/80 must be reachable and unused for standalone issuance, and reachable for renewal. If configured APT mirrors fail, the manager retries using official Ubuntu archives for Certbot without editing the server's APT source files. The manager does not edit DNS provider records.
+- **Dropbear:** install a separate Dropbear service on TCP/143 and an internal backend on TCP/2109. HAProxy multiplexes raw SSH and WebSocket HTTP on TCP/109; manage Dropbear logins through the shared SSH account store.
+- **VLESS, VMess, Trojan, Shadowsocks:** install Xray-core; create accounts and client links, renew, delete, inspect, create one-day trials, list accounts, view aggregate established connection counts, and automatically expire accounts. TLS WebSocket and gRPC share TCP/443 through HAProxy and Nginx; VLESS/VMess cleartext WebSocket uses TCP/80. Xray listens only on loopback ports 10001–10008.
+- **Shared TCP gateway and WebSocket:** HAProxy owns public TCP/80, TCP/443, and TCP/109. It routes HTTP, TLS, raw SSH, and OpenVPN TCP handshakes; Nginx routes protocol paths to Xray and a restricted WebSocket bridge. TCP/81 exposes a simple health response. TCP/143 is direct Dropbear.
+- **OpenVPN:** install certificate-authenticated TCP/1194, TCP/443 via the shared handshake multiplexer, and UDP/2200. Each account receives three embedded-certificate client profiles and can be renewed, revoked, listed, inspected, or expired. The TCP/443 profile uses the domain certificate only at the frontend where applicable; OpenVPN itself authenticates with its own CA.
+- **UDP Custom:** install the upstream ePro UDP-Custom server and manage individual Linux username/password accounts. Its UDP/1–65535 DNAT rule explicitly excludes UDP/53, UDP/2200 and WireGuard's configured port. It requires a compatible HTTP Custom client; the project does not implement that client protocol.
+- **TLS/domain:** setting a domain checks DNS and requests/installs a Let's Encrypt certificate using Certbot's no-email registration mode. The DNS A/AAAA record must already point to this VPS. Certificate HTTP-01 issuance and renewal require inbound TCP/80. If configured APT mirrors fail, the manager retries official Ubuntu archives without editing the server's APT source files. DNS provider records are not edited.
 - **WireGuard:** configure a server and create peers/client profiles; renew, delete, inspect, create one-day trial peers, list accounts, view recent-handshake status, and automatically remove expired peers.
 - **DNSTT:** configure a delegated DNS zone and router, create isolated endpoints with their own server keys and services, renew/delete/inspect/list endpoints, create one-day trials, view service state, and automatically remove expired endpoints.
 
-The **Services / Ports** screen catalogs the services and ports shown in the supplied reference images. It also identifies shared-port conflicts. It does not imply that every listed daemon is installed or managed.
+The **Services / Ports** screen describes the implemented public ports and the listeners that share them. HAProxy/Nginx path and handshake routing is required because several protocols share TCP/80 and TCP/443.
 
 ## Important protocol limits
 
-- **OpenVPN, legacy UDP Custom, standalone WebSocket bridges, Shadowsocks standalone transport menus, Nginx, and HAProxy** are not implemented as account backends in this build. Their service/port entries are informational, and the terminal reports these protocols as unavailable.
+- **UDP Custom** downloads the upstream ePro x86_64 binary. Its wire protocol is proprietary; use a compatible client. The broad UDP range is implemented with exclusions for DNSTT, OpenVPN and WireGuard.
 - **TLS** is a certificate transport used by Xray accounts, not a standalone account protocol.
 - **UDP Custom** is not one standard protocol; the compatible server and client format have to be selected before implementing its account lifecycle.
 - **SlowDNS** implementations often use proprietary client formats. This project offers the separate-endpoint DNSTT manager, not a drop-in SlowDNS replacement.
 - Vanilla DNSTT authenticates the server, not the client. Anyone with endpoint details can use that endpoint. Removing it stops the endpoint for all users. [DNSTT authentication documentation](https://github.com/Mygod/dnstt/blob/plugin/README#encryption-and-authentication).
 - Xray connection counts are established TCP sockets, not unique user counts. DNSTT status reports endpoint services; DNSTT does not authenticate or count individual clients.
 - Public DNS records, provider firewalls, and domain ownership are external prerequisites. The manager cannot configure them.
-- This build has not been tested against a live VPS or external VPN clients. Validate each client connection after configuring DNS and provider firewall rules.
+- Local unit/integration tests validate generated configs, menus and the WebSocket bridge. They do not prove external client connectivity. Each service must still be exercised on a clean Ubuntu 24.04 VPS after DNS and provider firewall setup.
 
 ## Install
 
@@ -37,9 +40,9 @@ The installer runs the local test suite and copies the manager to `/opt/kennet-p
 
 ## Domains and ports
 
-Set the shared domain from the TLS/domain menu; the manager checks DNS and requests a certificate without asking for an email address. Point the domain's A/AAAA record to the VPS first. Certificate issuance needs inbound TCP/80, and standalone issuance cannot proceed while another service is listening on TCP/80. Xray defaults are TCP/443 (VLESS), TCP/8443 (VMess), and TCP/2053 (Trojan). SSH uses TCP/22. WireGuard uses its configured UDP port (51820 by default). DNSTT listens on UDP/53 by default.
+Set the shared domain from the TLS/domain menu; the manager checks DNS and requests a certificate without asking for an email address. Point the domain's A/AAAA record to the VPS first. Certificate issuance needs inbound TCP/80. OpenSSH uses TCP/22. Xray TLS WebSocket/gRPC use TCP/443 and VLESS/VMess cleartext WebSocket use TCP/80. OpenVPN uses TCP/1194, TCP/443 and UDP/2200. Dropbear uses TCP/143 plus TCP/109 multiplexing. WireGuard uses its configured UDP port (51820 by default). DNSTT uses UDP/53.
 
-The catalog also includes TCP/109 and TCP/143 (Dropbear), TCP/1194 and UDP/2200 (OpenVPN), TCP/80/81/443 (web frontend), and UDP/7100/7200/7300 (BadVPN gateway). OpenVPN and the other informational services are not necessarily enabled. TCP/80 and TCP/443 cannot be independently bound by multiple services; a compatible frontend is required to multiplex them.
+UDP Custom claims UDP/1–65535 using DNAT, excluding UDP/53, UDP/2200 and WireGuard's configured port. HAProxy is the sole public listener on TCP/80, TCP/109 and TCP/443; Nginx and Xray use loopback backends. DNSTT and OpenVPN UDP are separate public UDP listeners.
 
 When UFW is active, the manager asks before adding narrow firewall allowances. It does not enable UFW, since doing so without reviewing SSH access can lock out the server. Provider-side firewall rules must be configured in the VPS control panel.
 

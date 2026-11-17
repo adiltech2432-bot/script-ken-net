@@ -8,7 +8,7 @@ class PanelTests(unittest.TestCase):
     def test_expected_protocols_are_listed(self):
         self.assertEqual(
             {p.key for p in panel.PROTOCOLS},
-            {"ssh", "dropbear", "tls", "vless", "trojan", "vmess", "openvpn", "udp", "wireguard", "slowdns", "dnstt"},
+            {"ssh", "dropbear", "tls", "vless", "trojan", "vmess", "shadowsocks", "openvpn", "udp", "wireguard", "slowdns", "dnstt"},
         )
 
     def test_account_protocols_are_managed_by_local_manager(self):
@@ -28,11 +28,11 @@ class PanelTests(unittest.TestCase):
         state, _ = panel.protocol_state(p)
         self.assertEqual(state, "Not ready")
 
-    def test_udp_is_not_misreported_as_a_standard_account_protocol(self):
+    def test_udp_custom_is_not_reported_ready_without_installed_binary(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "udp")
         state, detail = panel.protocol_state(p)
         self.assertEqual(state, "Not ready")
-        self.assertIn("not a standard account protocol", detail)
+        self.assertIn("UDP-Custom binary/configuration is missing", detail)
 
     def test_slowdns_and_dnstt_share_detected_server_services(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "slowdns")
