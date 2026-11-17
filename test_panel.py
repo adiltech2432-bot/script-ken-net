@@ -43,6 +43,12 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(state, "Active")
         self.assertIn("dnstt-server", detail)
 
+    def test_slowdns_explains_its_dnstd_manager_setup(self):
+        p = next(x for x in panel.PROTOCOLS if x.key == "slowdns")
+        state, detail = panel.protocol_state(p)
+        self.assertEqual(state, "Not ready")
+        self.assertIn("DNSTT manager in option 11", detail)
+
     @patch.object(panel.subprocess, "run")
     @patch.object(panel.Path, "is_file", return_value=True)
     @patch.object(panel.os, "access", return_value=True)

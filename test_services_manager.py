@@ -1,5 +1,6 @@
 import base64
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -10,6 +11,14 @@ from types import SimpleNamespace
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_xray_installer_validates_and_starts_service(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(services, "XRAY_CONFIG", __import__("pathlib").Path(temp) / "config.json"), \
+             patch("builtins.input", return_value="YES"), patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
+             patch.object(services, "_run") as run, patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as subprocess_run:
+            services.xray_install()
+        self.assertTrue(any(call.args[0] == ["systemctl", "enable", "--now", "xray"] for call in run.mock_calls))
+        self.assertIn("-test", subprocess_run.call_args_list[0].args[0])
+
     def test_vless_link_contains_uuid_tls_domain_and_port(self):
         link = services.client_link("vless", "alice", "id-value", "vpn.example.com")
         self.assertTrue(link.startswith("vless://id-value@vpn.example.com:443?"))

@@ -34,7 +34,7 @@ PROTOCOLS = (
     Protocol("openvpn", "OpenVPN", "openvpn-server@server-tcp", note="Install the certificate-based OpenVPN manager first."),
     Protocol("udp", "UDP Custom", "kennet-udp-custom", note="Install the upstream UDP-Custom backend first."),
     Protocol("wireguard", "WireGuard", "wg-quick"),
-    Protocol("slowdns", "SlowDNS", "server", note="No SlowDNS-compatible service is configured on this VPS."),
+    Protocol("slowdns", "SlowDNS", "server", note="SlowDNS endpoints use the DNSTT manager in option 11; configure its DNS zone and router first."),
     Protocol("dnstt", "DNSTT", "server", note="Configure the DNSTT tools, delegated domain, DNS router, and endpoint first."),
 )
 

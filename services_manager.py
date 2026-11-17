@@ -320,7 +320,14 @@ def xray_install() -> None:
             raise RuntimeError((p.stderr or p.stdout).strip())
     if not XRAY_CONFIG.exists():
         _atomic(XRAY_CONFIG, json.dumps({"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"}],"routing":{"rules":[]}}, indent=2)+"\n", 0o644)
-    _run(["systemctl", "enable", "xray"])
+    check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
+    if check.returncode:
+        raise RuntimeError((check.stderr or check.stdout or "Xray configuration validation failed").strip())
+    _run(["systemctl", "enable", "--now", "xray"])
+    active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True, check=False)
+    if active.returncode:
+        raise RuntimeError("Xray was installed, but xray.service did not become active; inspect: journalctl -u xray -n 80 --no-pager")
+    print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
 
 
 def get_xray_config() -> dict:

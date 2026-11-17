@@ -61,6 +61,9 @@ def install_tools() -> bool:
         _run(["apt-get", "install", "-y", "golang-go"])
     env = os.environ.copy()
     env["GOBIN"] = "/usr/local/bin"
+    # Fall back to VCS downloads for proxy errors such as the 403 reported on the test VPS.
+    # Keep the Go checksum database enabled; only the module source route changes.
+    env["GOPROXY"] = "https://proxy.golang.org|direct"
     _run(["go", "install", "www.bamsoftware.com/git/dnstt.git/dnstt-server@latest"], env=env)
     _run(["go", "install", "www.bamsoftware.com/git/dnstt.git/dnstt-client@latest"], env=env)
     for name in ("dnstt-server", "dnstt-client"):
