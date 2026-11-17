@@ -137,10 +137,13 @@ def menu() -> None:
                 password = services_manager.local_user_add("udp", name, days, trial=trial, create_home=False)
                 services_manager.show_created_account("udp", name, password, days, trial=trial)
             elif choice == "3":
-                name = input("Username: ").strip(); days = int(input("Extend validity by days [30]: ").strip() or "30")
+                name = terminal_ui.select_account("UDP CUSTOM", services_manager.local_user_list("udp"))
+                if name is None: continue
+                days = int(input("Extend validity by days [30]: ").strip() or "30")
                 services_manager.local_user_renew("udp", name, days); print("Account renewed.")
             elif choice == "4":
-                name = input("Username: ").strip()
+                name = terminal_ui.select_account("UDP CUSTOM", services_manager.local_user_list("udp"))
+                if name is None: continue
                 if input(f"Delete {name}? Type YES: ").strip() == "YES":
                     services_manager.local_user_remove("udp", name)
             elif choice == "5":
@@ -149,7 +152,11 @@ def menu() -> None:
                 for name in services_manager.local_user_list("udp"):
                     print(services_manager.account_details("udp", name))
             elif choice == "8":
-                print("Connected UDP-Custom users:", services_manager.active_connections("udp") or "none detected")
+                sessions = services_manager.active_connections("udp")
+                names = services_manager.local_user_list("udp")
+                print("Registered UDP-Custom accounts and sessions:")
+                for name in names: print(f"- {name}: {sessions.get(name, 0)}")
+                if not names: print("- none")
             else:
                 print("Invalid selection")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

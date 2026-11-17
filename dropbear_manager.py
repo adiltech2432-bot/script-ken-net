@@ -60,15 +60,22 @@ def menu() -> None:
                 password = services_manager.ssh_add(username, days, trial=trial)
                 services_manager.show_created_account("dropbear", username, password, days, trial=trial)
             elif choice == "3":
-                username=input("Username: ").strip(); days=int(input("Extend validity by days [30]: ").strip() or "30")
+                username=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
+                if username is None: continue
+                days=int(input("Extend validity by days [30]: ").strip() or "30")
                 services_manager.ssh_renew(username,days); print("Account renewed.")
             elif choice == "4":
-                username=input("Username: ").strip()
+                username=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
+                if username is None: continue
                 if input(f"Delete {username}? Type YES: ").strip()=="YES": services_manager.ssh_remove(username)
             elif choice == "7": print("Accounts:", ", ".join(services_manager.ssh_list()) or "none")
-            elif choice == "8": print("Connected sessions:", services_manager.active_connections("ssh"))
+            elif choice == "8":
+                sessions = services_manager.active_connections("ssh")
+                print("Dropbear/SSH registered accounts and sessions:")
+                for name in services_manager.ssh_list(): print(f"- {name}: {sessions.get(name, 0)}")
             elif choice == "9":
-                name=input("Username: ").strip(); services_manager.show_account_details("dropbear", name)
+                name=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
+                if name is not None: services_manager.show_account_details("dropbear", name)
             else: print("Invalid selection")
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"Operation failed: {exc}")

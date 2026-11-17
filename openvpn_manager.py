@@ -294,13 +294,21 @@ def menu() -> None:
                     ("Account type", "TRIAL" if trial else "REGULAR"),
                 ], note="Client profiles contain private keys. Transfer them securely.")
             elif choice == "3":
-                name = input("Username: ").strip(); days = int(input("Extend validity by days [30]: ").strip() or "30")
+                names = sorted(name for name, item in _account_state().get("accounts", {}).items() if item.get("protocol") == "openvpn")
+                name = terminal_ui.select_account("OPENVPN", names)
+                if name is None: continue
+                days = int(input("Extend validity by days [30]: ").strip() or "30")
                 print("New client profiles:", renew_account(name, days)["profile_dir"])
             elif choice == "4":
-                name = input("Username: ").strip()
+                names = sorted(name for name, item in _account_state().get("accounts", {}).items() if item.get("protocol") == "openvpn")
+                name = terminal_ui.select_account("OPENVPN", names)
+                if name is None: continue
                 if input(f"Revoke and delete {name}? Type YES: ").strip() == "YES": delete_account(name)
             elif choice == "5":
-                name = input("Username: ").strip(); record = services_manager.account_details("openvpn", name)
+                names = sorted(name for name, item in _account_state().get("accounts", {}).items() if item.get("protocol") == "openvpn")
+                name = terminal_ui.select_account("OPENVPN", names)
+                if name is None: continue
+                record = services_manager.account_details("openvpn", name)
                 terminal_ui.detail_card("OPENVPN ACCOUNT", [
                     ("Remarks", name), ("Host server", services_manager.state().get("domain") or "Set a domain"),
                     ("Access ports", "1194/TCP, 2200/UDP"), ("Transport", "OpenVPN TLS"),
@@ -311,7 +319,12 @@ def menu() -> None:
             elif choice == "7":
                 for name, record in _account_state().get("accounts", {}).items():
                     if record.get("protocol") == "openvpn": print(f"{name} | {record.get('expires_at')} | {record.get('profile_dir')}")
-            elif choice == "8": print("Connected:", ", ".join(connected_sessions()) or "none")
+            elif choice == "8":
+                active = set(connected_sessions())
+                names = sorted(name for name, item in _account_state().get("accounts", {}).items() if item.get("protocol") == "openvpn")
+                print("OpenVPN accounts and sessions:")
+                for name in names: print(f"- {name}: {'CONNECTED' if name in active else 'offline'}")
+                if not names: print("- none")
             else: print("Invalid selection")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             print(f"Operation failed: {exc}")

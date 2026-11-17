@@ -427,12 +427,14 @@ def menu() -> None:
                     ("Valid until", account["expires_at"]), ("Client command", command),
                     ("Profile file", profile)], note="DNSTT does not authenticate clients; protect these connection details.\n" + records)
             elif choice == "5":
-                username = input("Username: ").strip()
+                username = terminal_ui.select_account("DNSTT", sorted(list_accounts()))
+                if username is None: continue
                 days = int(input("Extend validity by days [30]: ").strip() or "30")
                 renew_account(username, days)
                 print("Endpoint renewed.")
             elif choice == "6":
-                username = input("Username: ").strip()
+                username = terminal_ui.select_account("DNSTT", sorted(list_accounts()))
+                if username is None: continue
                 if input(f"Endpoint {username} will stop for everyone using it. Type YES: ").strip() == "YES":
                     remove_account(username)
                     print("Tunnel stopped; key and service removed.")
@@ -441,11 +443,15 @@ def menu() -> None:
                 for username, record in sorted(list_accounts().items()):
                     print(f"- {username} | {record['domain']} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
             elif choice == "9":
-                for username, record in sorted(list_accounts().items()):
+                accounts = sorted(list_accounts().items())
+                print("DNSTT endpoints (service state; client sessions cannot be attributed):")
+                for username, record in accounts:
                     result = subprocess.run(["systemctl", "is-active", record["service"]], capture_output=True, text=True)
                     print(f"- {username}: service {result.stdout.strip() or 'inactive'} (DNSTT cannot count authenticated users)")
+                if not accounts: print("- none")
             elif choice == "10":
-                username = input("Username: ").strip()
+                username = terminal_ui.select_account("DNSTT", sorted(list_accounts()))
+                if username is None: continue
                 account = account_details(username)
                 profile = Path(account["key_dir"]) / "client" / "client.txt"
                 content = profile.read_text(encoding="utf-8")

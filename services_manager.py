@@ -565,7 +565,7 @@ def xray_account_fields(protocol: str, username: str, record: dict, domain: str)
 
 def show_account_details(protocol: str, username: str) -> None:
     import terminal_ui
-    record = account_details(protocol, username)
+    record = account_details("ssh" if protocol == "dropbear" else protocol, username)
     if protocol in {"ssh", "dropbear", "udp"}:
         if protocol == "udp":
             port_text = "UDP destination ports 1-65535 (reserved VPN/DNS ports excluded)"
@@ -583,6 +583,8 @@ def show_account_details(protocol: str, username: str) -> None:
     domain = state().get("domain", "")
     terminal_ui.detail_card(f"XRAY/{protocol.upper()} ACCOUNT",
                             xray_account_fields(protocol, username, record, domain))
+    terminal_ui.copy_prompt([("WebSocket link", client_link(protocol, username, record["credential"], domain)),
+                             ("gRPC link", grpc_client_link(protocol, username, record["credential"], domain))])
 
 
 def show_created_account(protocol: str, username: str, credential: str, days: int, *, trial: bool = False) -> None:
@@ -603,6 +605,8 @@ def show_created_account(protocol: str, username: str, credential: str, days: in
     terminal_ui.detail_card(f"XRAY/{protocol.upper()} ACCOUNT",
                             xray_account_fields(protocol, username, record, current.get("domain", "")),
                             note="VLESS/VMess authenticate with a UUID client ID; Trojan authenticates with the account-name password.")
+    terminal_ui.copy_prompt([("WebSocket link", client_link(protocol, username, credential, current.get("domain", ""))),
+                             ("gRPC link", grpc_client_link(protocol, username, credential, current.get("domain", "")))])
 
 
 def configure_tls() -> None:
@@ -786,19 +790,25 @@ def account_menu(protocol: str) -> None:
                     credential = xray_add(protocol, username, days, trial=trial)
                     show_created_account(protocol, username, credential, days, trial=trial)
             elif choice == "3":
-                username = input("Username: ").strip()
+                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
+                username = terminal_ui.select_account(title, names)
+                if username is None: continue
                 days = int(input("Extend validity by days [30]: ").strip() or "30")
                 if protocol == "ssh": ssh_renew(username, days)
                 else: xray_renew(protocol, username, days)
                 print("Account renewed.")
             elif choice == "4":
-                username = input("Username: ").strip()
+                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
+                username = terminal_ui.select_account(title, names)
+                if username is None: continue
                 if input(f"Delete {username} and revoke its access? Type YES: ").strip() == "YES":
                     if protocol == "ssh": ssh_remove(username)
                     else: xray_remove(protocol, username)
                     print("Account deleted.")
             elif choice == "5":
-                username = input("Username: ").strip()
+                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
+                username = terminal_ui.select_account(title, names)
+                if username is None: continue
                 show_account_details(protocol, username)
             elif choice == "7":
                 purge_expired()
@@ -808,10 +818,16 @@ def account_menu(protocol: str) -> None:
                     record = account_details(protocol, username)
                     print(f"- {username} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
             elif choice == "8":
+                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
                 sessions = active_connections(protocol)
-                print("Connected sessions:")
-                for username, count in sessions.items(): print(f"- {username}: {count}")
-                if not sessions: print("- none detected")
+                print(f"Registered {title} accounts ({len(names)}): " + (", ".join(names) or "none"))
+                if protocol == "ssh":
+                    print("Connected sessions:")
+                    for username in names: print(f"- {username}: {sessions.get(username, 0)}")
+                    if not sessions: print("- none detected")
+                else:
+                    print("Xray active connection total (not unique users): " + str(sessions.get("active connections (not unique users)", 0)))
+                    print("This Xray configuration does not attribute live sessions to individual account names.")
             else:
                 print("Invalid selection.")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:

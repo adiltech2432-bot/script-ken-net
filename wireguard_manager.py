@@ -380,12 +380,14 @@ def menu() -> None:
                     ("Valid until", record["expires_at"]), ("Profile file", path)],
                     note="The profile contains the client's private key. Transfer it securely.")
             elif choice == "3":
-                name = input("Username: ").strip()
+                name = terminal_ui.select_account("WIREGUARD", sorted(list_peers()))
+                if name is None: continue
                 days = int(input("Extend validity by days [30]: ").strip() or "30")
                 renew_peer(name, days)
                 print("Peer renewed.")
             elif choice == "4":
-                name = input("Username: ").strip()
+                name = terminal_ui.select_account("WIREGUARD", sorted(list_peers()))
+                if name is None: continue
                 if input(f"Confirm removal of peer {name}? Type YES: ").strip() == "YES":
                     remove_peer(interface, name)
                     print("Peer and client profile removed.")
@@ -397,12 +399,15 @@ def menu() -> None:
                 for name, record in sorted(list_peers().items()):
                     print(f"- {name} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
             elif choice == "8":
-                for name in sorted(list_peers()):
+                names = sorted(list_peers())
+                print("WireGuard peers and connection state:")
+                for name in names:
                     details = peer_details(interface, name)
-                    if details.get("connected"):
-                        print(f"- {name}: handshake within 3 minutes")
+                    print(f"- {name}: {'CONNECTED (handshake within 3 minutes)' if details.get('connected') else 'offline'}")
+                if not names: print("- none")
             elif choice == "9":
-                name = input("Username: ").strip()
+                name = terminal_ui.select_account("WIREGUARD", sorted(list_peers()))
+                if name is None: continue
                 record = peer_details(interface, name)
                 endpoint = input("Server address and port (from the client profile): ").strip()
                 terminal_ui.detail_card("WIREGUARD ACCOUNT", [

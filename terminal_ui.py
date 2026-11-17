@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import base64
 import textwrap
 
 CYAN = "\033[96m"
@@ -51,3 +52,47 @@ def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "",
         for line in textwrap.wrap(note, width=inner):
             print(f"{YELLOW}│ {line.ljust(inner)} │{RESET}")
     print(f"{color}╰{'─' * (width - 2)}╯{RESET}")
+
+
+def select_account(title: str, names: list[str]) -> str | None:
+    """Show the roster before an account action; return a selected name or None."""
+    if not names:
+        print(f"{title}: no accounts are registered.")
+        return None
+    heading(f"{title} — REGISTERED ACCOUNTS")
+    for index, name in enumerate(names, 1):
+        print(f"{CYAN}[{index:02}] {name}{RESET}")
+    print(f"{YELLOW}[0] Cancel{RESET}")
+    choice = input("Select account number or enter username: ").strip()
+    if choice in {"", "0"}:
+        return None
+    if choice in names:
+        return choice
+    if choice.isdigit():
+        index = int(choice)
+        if 1 <= index <= len(names):
+            return names[index - 1]
+        print("Invalid account number.")
+        return None
+    print("That username is not in the registered account list.")
+    return None
+
+
+def copy_prompt(items: list[tuple[str, str]]) -> None:
+    """Offer OSC 52 clipboard copy for SSH terminal clients, with a visible fallback."""
+    if not items:
+        return
+    print("Copy a connection link to your local terminal clipboard:")
+    for index, (label, _value) in enumerate(items, 1):
+        print(f"{index}. {label}")
+    print("0. Skip (select the printed link manually)")
+    choice = input("Copy: ").strip()
+    if not choice.isdigit() or not 1 <= int(choice) <= len(items):
+        return
+    label, value = items[int(choice) - 1]
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    # OSC 52 lets compatible local terminal emulators set their clipboard over SSH.
+    import sys
+    sys.stdout.write(f"\033]52;c;{encoded}\a")
+    sys.stdout.flush()
+    print(f"{label} sent to the terminal clipboard. If your terminal blocks OSC 52, select and copy the printed link manually.")
