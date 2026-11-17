@@ -566,13 +566,19 @@ def xray_account_fields(protocol: str, username: str, record: dict, domain: str)
 def show_account_details(protocol: str, username: str) -> None:
     import terminal_ui
     record = account_details(protocol, username)
-    if protocol == "ssh":
-        terminal_ui.detail_card("SSH ACCOUNT", [
+    if protocol in {"ssh", "dropbear", "udp"}:
+        if protocol == "udp":
+            port_text = "UDP destination ports 1-65535 (reserved VPN/DNS ports excluded)"
+            title = "UDP CUSTOM ACCOUNT"
+        else:
+            port_text = "22/TCP (OpenSSH)" + (", 109/TCP and 143/TCP (Dropbear)" if protocol == "dropbear" else "")
+            title = f"{protocol.upper()} ACCOUNT"
+        terminal_ui.detail_card(title, [
             ("Remarks", username), ("Host server", state().get("domain") or "VPS public IP"),
-            ("Port", "22/TCP"), ("Protocol", "SSH"),
+            ("Access ports", port_text), ("Protocol", protocol.upper()),
             ("Valid until", record.get("expires_at", "unknown")),
             ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
-        ], note="SSH passwords are not stored in recoverable form. Renew the account to set a new password.")
+        ], note="Passwords are not stored in recoverable form. Renew the account to set a new password.")
         return
     domain = state().get("domain", "")
     terminal_ui.detail_card(f"XRAY/{protocol.upper()} ACCOUNT",

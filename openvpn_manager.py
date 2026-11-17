@@ -286,8 +286,13 @@ def menu() -> None:
                 name = "trial" + secrets.token_hex(3) if trial else input("Username: ").strip()
                 days = 1 if trial else int(input("Validity days [30]: ").strip() or "30")
                 record = add_account(name, days, trial=trial)
-                print(json.dumps({"username": name, **record}, indent=2))
-                print("Client profiles:", record["profile_dir"])
+                terminal_ui.detail_card("OPENVPN ACCOUNT", [
+                    ("Remarks", name), ("Host server", services_manager.state().get("domain") or "Set a domain"),
+                    ("Access ports", "1194/TCP, 2200/UDP"), ("Transport", "OpenVPN TLS"),
+                    ("Certificate CN", record["cert_cn"]), ("Client profiles", record["profile_dir"]),
+                    ("Valid until", record["expires_at"]),
+                    ("Account type", "TRIAL" if trial else "REGULAR"),
+                ], note="Client profiles contain private keys. Transfer them securely.")
             elif choice == "3":
                 name = input("Username: ").strip(); days = int(input("Extend validity by days [30]: ").strip() or "30")
                 print("New client profiles:", renew_account(name, days)["profile_dir"])
@@ -295,7 +300,14 @@ def menu() -> None:
                 name = input("Username: ").strip()
                 if input(f"Revoke and delete {name}? Type YES: ").strip() == "YES": delete_account(name)
             elif choice == "5":
-                name = input("Username: ").strip(); print(json.dumps(services_manager.account_details("openvpn", name), indent=2))
+                name = input("Username: ").strip(); record = services_manager.account_details("openvpn", name)
+                terminal_ui.detail_card("OPENVPN ACCOUNT", [
+                    ("Remarks", name), ("Host server", services_manager.state().get("domain") or "Set a domain"),
+                    ("Access ports", "1194/TCP, 2200/UDP"), ("Transport", "OpenVPN TLS"),
+                    ("Certificate CN", record["cert_cn"]), ("Client profiles", record["profile_dir"]),
+                    ("Valid until", record.get("expires_at", "unknown")),
+                    ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
+                ], note="Client profiles contain private keys. Transfer them securely.")
             elif choice == "7":
                 for name, record in _account_state().get("accounts", {}).items():
                     if record.get("protocol") == "openvpn": print(f"{name} | {record.get('expires_at')} | {record.get('profile_dir')}")

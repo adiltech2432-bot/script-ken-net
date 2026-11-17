@@ -446,7 +446,19 @@ def menu() -> None:
                     print(f"- {username}: service {result.stdout.strip() or 'inactive'} (DNSTT cannot count authenticated users)")
             elif choice == "10":
                 username = input("Username: ").strip()
-                print(json.dumps(account_details(username), indent=2))
+                account = account_details(username)
+                profile = Path(account["key_dir"]) / "client" / "client.txt"
+                content = profile.read_text(encoding="utf-8")
+                pubkey = next((line.partition(":")[2].strip() for line in content.splitlines() if line.startswith("Server public key:")), "")
+                command = next((line for line in content.splitlines() if line.startswith("dnstt-client ")), "")
+                resolver = next((line.partition(":")[2].strip() for line in content.splitlines() if line.startswith("Resolver:")), "")
+                terminal_ui.detail_card("DNSTT ACCOUNT", [
+                    ("Remarks", username), ("Endpoint", account.get("domain", "unknown")),
+                    ("DNS resolver", resolver), ("DNS port", "53/UDP"),
+                    ("Server public key", pubkey), ("Local tunnel port", account.get("local_port", "unknown")),
+                    ("Valid until", account.get("expires_at", "unknown")),
+                    ("Client command", command), ("Profile file", profile),
+                ], note="DNSTT does not authenticate clients; anyone with these endpoint details can connect.")
             else:
                 print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:

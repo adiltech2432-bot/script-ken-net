@@ -68,7 +68,7 @@ def menu() -> None:
             elif choice == "7": print("Accounts:", ", ".join(services_manager.ssh_list()) or "none")
             elif choice == "8": print("Connected sessions:", services_manager.active_connections("ssh"))
             elif choice == "9":
-                name=input("Username: ").strip(); print(services_manager.account_details("ssh",name))
+                name=input("Username: ").strip(); services_manager.show_account_details("dropbear", name)
             else: print("Invalid selection")
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"Operation failed: {exc}")

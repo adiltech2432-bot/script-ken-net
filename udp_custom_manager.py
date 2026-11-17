@@ -144,7 +144,7 @@ def menu() -> None:
                 if input(f"Delete {name}? Type YES: ").strip() == "YES":
                     services_manager.local_user_remove("udp", name)
             elif choice == "5":
-                name = input("Username: ").strip(); print(services_manager.account_details("udp", name))
+                name = input("Username: ").strip(); services_manager.show_account_details("udp", name)
             elif choice == "7":
                 for name in services_manager.local_user_list("udp"):
                     print(services_manager.account_details("udp", name))

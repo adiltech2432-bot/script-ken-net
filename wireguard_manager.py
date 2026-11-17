@@ -403,7 +403,18 @@ def menu() -> None:
                         print(f"- {name}: handshake within 3 minutes")
             elif choice == "9":
                 name = input("Username: ").strip()
-                print(json.dumps(peer_details(interface, name), indent=2))
+                record = peer_details(interface, name)
+                endpoint = input("Server address and port (from the client profile): ").strip()
+                terminal_ui.detail_card("WIREGUARD ACCOUNT", [
+                    ("Remarks", name), ("Interface", record.get("interface", interface)),
+                    ("Client address", record.get("address", "unknown")),
+                    ("Server endpoint", endpoint or "See client profile"),
+                    ("Client public key", record.get("public_key", "unknown")),
+                    ("Connected", "YES" if record.get("connected") else "NO"),
+                    ("Valid until", record.get("expires_at", "unknown")),
+                    ("Profile file", record.get("profile", "unknown")),
+                    ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
+                ], note="The client profile contains a private key; transfer it securely.")
             else:
                 print("Invalid selection")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
