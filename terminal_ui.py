@@ -42,6 +42,11 @@ def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "",
     print(f"\n{color}╭{'─' * (width - 2)}╮")
     print(f"│ {title[:inner].center(inner)} │")
     print(f"├{'─' * (width - 2)}┤{RESET}")
+    # Connection URIs are printed after the card as plain, isolated lines. Keeping
+    # them out of a fixed-width box avoids inserting indentation or border text
+    # into manual terminal selections, especially in narrow SSH clients.
+    links = [(label, str(value)) for label, value in fields if label.lower().startswith("link ")]
+    fields = [(label, value) for label, value in fields if not label.lower().startswith("link ")]
     for label, value in fields:
         wrapped = textwrap.wrap(str(value), width=max(20, inner - 23), break_long_words=True, break_on_hyphens=False) or [""]
         for index, line in enumerate(wrapped):
@@ -52,6 +57,11 @@ def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "",
         for line in textwrap.wrap(note, width=inner):
             print(f"{YELLOW}│ {line.ljust(inner)} │{RESET}")
     print(f"{color}╰{'─' * (width - 2)}╯{RESET}")
+    for label, value in links:
+        print(f"\n{CYAN}{label}:{RESET}")
+        # Deliberately do not wrap or truncate: terminals may visually wrap the
+        # line, but the output itself stays a single exact, copyable URI.
+        print(f"{GREEN}{value}{RESET}")
 
 
 def select_account(title: str, names: list[str]) -> str | None:
@@ -59,15 +69,13 @@ def select_account(title: str, names: list[str]) -> str | None:
     if not names:
         print(f"{title}: no accounts are registered.")
         return None
-    heading(f"{title} — REGISTERED ACCOUNTS")
-    for index, name in enumerate(names, 1):
-        print(f"{CYAN}[{index:02}] {name}{RESET}")
+    names = sorted(set(names), key=str.casefold)
+    account_options = [(f"{index:02}", name) for index, name in enumerate(names, 1)]
+    option_cards(f"{title} — SELECT ACCOUNT", account_options, columns=2, color=CYAN)
     print(f"{YELLOW}[0] Cancel{RESET}")
-    choice = input("Select account number or enter username: ").strip()
+    choice = input("Select account number: ").strip()
     if choice in {"", "0"}:
         return None
-    if choice in names:
-        return choice
     if choice.isdigit():
         index = int(choice)
         if 1 <= index <= len(names):
