@@ -82,17 +82,22 @@ def copy_prompt(items: list[tuple[str, str]]) -> None:
     """Offer OSC 52 clipboard copy for SSH terminal clients, with a visible fallback."""
     if not items:
         return
+    import sys
+    if not sys.stdin.isatty():
+        return
     print("Copy a connection link to your local terminal clipboard:")
     for index, (label, _value) in enumerate(items, 1):
         print(f"{index}. {label}")
     print("0. Skip (select the printed link manually)")
-    choice = input("Copy: ").strip()
+    try:
+        choice = input("Copy: ").strip()
+    except EOFError:
+        return
     if not choice.isdigit() or not 1 <= int(choice) <= len(items):
         return
     label, value = items[int(choice) - 1]
     encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
     # OSC 52 lets compatible local terminal emulators set their clipboard over SSH.
-    import sys
     sys.stdout.write(f"\033]52;c;{encoded}\a")
     sys.stdout.flush()
     print(f"{label} sent to the terminal clipboard. If your terminal blocks OSC 52, select and copy the printed link manually.")
