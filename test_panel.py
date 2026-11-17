@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import panel
+import udp_custom_manager
 
 
 class PanelTests(unittest.TestCase):
@@ -30,7 +31,8 @@ class PanelTests(unittest.TestCase):
 
     def test_udp_custom_is_not_reported_ready_without_installed_binary(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "udp")
-        state, detail = panel.protocol_state(p)
+        with patch.object(udp_custom_manager, "ready", return_value=(False, "UDP-Custom binary/configuration is missing")):
+            state, detail = panel.protocol_state(p)
         self.assertEqual(state, "Not ready")
         self.assertIn("UDP-Custom binary/configuration is missing", detail)
 
