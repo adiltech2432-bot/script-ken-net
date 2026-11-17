@@ -304,6 +304,16 @@ def xray_renew(protocol: str, username: str, days: int) -> None:
     record = account_details(protocol, username)
     record["expires_at"] = (dt.date.today() + dt.timedelta(days=days)).isoformat()
     record["trial"] = False
+    if protocol == "trojan" and record.get("credential") != username:
+        # Apply the requested username-as-password convention on renewal too.
+        cfg = get_xray_config()
+        for inbound in cfg.get("inbounds", []):
+            if inbound.get("tag") in _managed_tags(protocol):
+                for client in inbound.get("settings", {}).get("clients", []):
+                    if client.get("email") == username:
+                        client["password"] = username
+        _write_xray(cfg)
+        record["credential"] = username
     data = state(); data["accounts"][username] = {k:v for k,v in record.items() if k != "username"}
     _atomic(STATE, json.dumps(data, indent=2) + "\n")
 
@@ -379,7 +389,10 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
     gateway_ready, gateway_detail = gateway_manager.is_ready()
     if not gateway_ready:
         raise RuntimeError("Shared HAProxy/Nginx gateway is not ready: " + gateway_detail + ". Use TLS/Domain > Request / renew certificate first")
-    credential = str(uuid.uuid4()) if protocol in {"vless", "vmess"} else secrets.token_urlsafe(24)
+    # VLESS and VMess require UUID client IDs; they do not have a password field.
+    # Trojan accepts a password, so use the account name as requested.
+    credential = (str(uuid.uuid4()) if protocol in {"vless", "vmess"}
+                  else username if protocol == "trojan" else secrets.token_urlsafe(24))
     client = _xray_client(protocol, username, credential)
     cfg.setdefault("inbounds", [])
     for inbound in _managed_protocol_inbounds(protocol, [client]):
@@ -506,6 +519,66 @@ def client_link(protocol: str, username: str, credential: str, domain: str) -> s
     return "vmess://" + base64.b64encode(raw).decode()
 
 
+def grpc_client_link(protocol: str, username: str, credential: str, domain: str) -> str:
+    """Build a shareable gRPC URI for the account's parallel Xray inbound."""
+    label = username.replace(" ", "_")
+    service = {"vless": "vless-grpc", "vmess": "vmess-grpc",
+               "trojan": "trojan-grpc", "shadowsocks": "ss-grpc"}[protocol]
+    if protocol == "vmess":
+        raw = json.dumps({"v": "2", "ps": label, "add": domain, "port": "443",
+                          "id": credential, "aid": "0", "scy": "auto", "net": "grpc",
+                          "type": "gun", "host": domain, "path": service,
+                          "tls": "tls", "sni": domain}, separators=(",", ":")).encode()
+        return "vmess://" + base64.b64encode(raw).decode()
+    if protocol == "shadowsocks":
+        userinfo = base64.urlsafe_b64encode(f"chacha20-ietf-poly1305:{credential}".encode()).decode().rstrip("=")
+        return f"ss://{userinfo}@{domain}:443/?plugin=v2ray-plugin%3Btls%3Bmode%3Dgrpc%3Bhost%3D{domain}%3Bpath%3D%2F{service}#{label}-gRPC"
+    if protocol == "trojan":
+        return f"trojan://{credential}@{domain}:443?security=tls&sni={domain}&type=grpc&serviceName={service}#{label}-gRPC"
+    return f"vless://{credential}@{domain}:443?encryption=none&security=tls&sni={domain}&type=grpc&serviceName={service}#{label}-gRPC"
+
+
+def xray_account_fields(protocol: str, username: str, record: dict, domain: str) -> list[tuple[str, object]]:
+    """Protocol-aware shared detail layout used after creation and from Show details."""
+    credential = str(record.get("credential", ""))
+    ws_path = {"vless": "/vless", "vmess": "/vmess", "trojan": "/trojan-ws", "shadowsocks": "/ss-ws"}[protocol]
+    grpc_service = {"vless": "vless-grpc", "vmess": "vmess-grpc",
+                    "trojan": "trojan-grpc", "shadowsocks": "ss-grpc"}[protocol]
+    credential_label = "Password" if protocol in {"trojan", "shadowsocks"} else "Client UUID"
+    return [
+        ("Remarks", username),
+        ("Host server", domain),
+        ("Server name (SNI)", domain),
+        ("Port TLS", "443/TCP"),
+        ("Protocol", protocol.upper()),
+        ("Transport", "WebSocket / gRPC"),
+        ("Security", "TLS"),
+        ("WS path", ws_path),
+        ("gRPC service", grpc_service),
+        (credential_label, credential),
+        ("Link WS", client_link(protocol, username, credential, domain)),
+        ("Link gRPC", grpc_client_link(protocol, username, credential, domain)),
+        ("Valid until", record.get("expires_at", "unknown")),
+        ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
+    ]
+
+
+def show_account_details(protocol: str, username: str) -> None:
+    import terminal_ui
+    record = account_details(protocol, username)
+    if protocol == "ssh":
+        terminal_ui.detail_card("SSH ACCOUNT", [
+            ("Remarks", username), ("Host server", state().get("domain") or "VPS public IP"),
+            ("Port", "22/TCP"), ("Protocol", "SSH"),
+            ("Valid until", record.get("expires_at", "unknown")),
+            ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
+        ], note="SSH passwords are not stored in recoverable form. Renew the account to set a new password.")
+        return
+    domain = state().get("domain", "")
+    terminal_ui.detail_card(f"XRAY/{protocol.upper()} ACCOUNT",
+                            xray_account_fields(protocol, username, record, domain))
+
+
 def show_created_account(protocol: str, username: str, credential: str, days: int, *, trial: bool = False) -> None:
     import terminal_ui
     expires = (dt.date.today() + dt.timedelta(days=days)).isoformat()
@@ -520,13 +593,10 @@ def show_created_account(protocol: str, username: str, credential: str, days: in
                   ("Account type", "TRIAL" if trial else "REGULAR")]
         terminal_ui.detail_card(f"{protocol.upper()} ACCOUNT", fields, note="Password is displayed once. Save it securely.")
         return
-    port = XRAY_PORTS[protocol]
-    credential_label = "Password" if protocol == "trojan" else "UUID"
-    fields = [("Remarks", username), ("Host server", domain), ("Port TLS", f"{port}/TCP"),
-              ("Network", "TCP"), ("Security", "TLS"), (credential_label, credential),
-              ("Valid until", expires), ("Account type", "TRIAL" if trial else "REGULAR"),
-              ("Client link", client_link(protocol, username, credential, current.get("domain", "")))]
-    terminal_ui.detail_card(f"{protocol.upper()} ACCOUNT", fields)
+    record = {"credential": credential, "expires_at": expires, "trial": trial}
+    terminal_ui.detail_card(f"XRAY/{protocol.upper()} ACCOUNT",
+                            xray_account_fields(protocol, username, record, current.get("domain", "")),
+                            note="VLESS/VMess authenticate with a UUID client ID; Trojan authenticates with the account-name password.")
 
 
 def configure_tls() -> None:
@@ -723,12 +793,7 @@ def account_menu(protocol: str) -> None:
                     print("Account deleted.")
             elif choice == "5":
                 username = input("Username: ").strip()
-                record = account_details(protocol, username)
-                print(json.dumps(record, indent=2))
-                if protocol != "ssh":
-                    print(client_link(protocol, username, record["credential"], state().get("domain", "")))
-                else:
-                    print("SSH password is not stored in recoverable form; reset it by renewing/recreating the account.")
+                show_account_details(protocol, username)
             elif choice == "7":
                 purge_expired()
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
