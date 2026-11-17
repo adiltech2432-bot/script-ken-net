@@ -208,8 +208,13 @@ def protocol_state(protocol: Protocol) -> tuple[str, str]:
         return "Not ready", "Set a domain with DNS pointing to this VPS, then request its TLS certificate"
     if protocol.service and systemd_active(protocol.service):
         if protocol.key in {"vless", "vmess", "trojan", "shadowsocks"}:
-            if not systemd_active("haproxy.service") or not systemd_active("nginx.service"):
-                return "Partially active", "Xray is running but the public TLS/WebSocket/gRPC gateway is not active"
+            try:
+                import gateway_manager
+                gateway_ready, gateway_detail = gateway_manager.is_ready()
+            except (ImportError, OSError, ValueError):
+                gateway_ready, gateway_detail = False, "Could not inspect the public gateway"
+            if not gateway_ready:
+                return "Partially active", "Xray is running but the public TLS/WebSocket/gRPC gateway is not ready: " + gateway_detail
         missing = [p for p in (protocol.add, protocol.delete, protocol.renew) if p and not Path(p).is_file()]
         if missing:
             return "Service active", "Missing management tools: " + ", ".join(missing)

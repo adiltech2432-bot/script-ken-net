@@ -255,13 +255,29 @@ def install() -> None:
 
 
 def is_ready() -> tuple[bool, str]:
-    missing = [unit for unit in ("haproxy", "nginx", "kennet-websocket")
+    """Check the public HTTP/TLS gateway used by Xray, OpenVPN, and Dropbear.
+
+    The optional WebSocket bridge serves SSH-style tunnels on a separate local
+    port; Xray WebSocket and gRPC are proxied directly by Nginx to Xray. Do not
+    let a stopped bridge mark the Xray TLS gateway unavailable.
+    """
+    missing = [unit for unit in ("haproxy", "nginx")
                if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode]
-    ports = {80, 443, 8080, 8443, 10015}
+    ports = {80, 443, 8080, 8443}
     if missing:
         return False, "Inactive gateway services: " + ", ".join(missing)
     listeners = subprocess.run(["ss", "-Hlnt"], text=True, capture_output=True, check=False).stdout
     missing_ports = [p for p in ports if not any(line.split()[3].endswith(f":{p}") for line in listeners.splitlines() if len(line.split()) > 3)]
     if missing_ports:
         return False, "Expected listeners missing: " + ", ".join(map(str, sorted(missing_ports)))
-    return True, "HAProxy/Nginx/WebSocket gateway services and expected listeners are active"
+    return True, "HAProxy/Nginx public HTTP/TLS gateway and expected listeners are active"
+
+
+def websocket_bridge_ready() -> tuple[bool, str]:
+    """Report the standalone SSH/OpenVPN WebSocket TCP bridge independently."""
+    if subprocess.run(["systemctl", "is-active", "--quiet", "kennet-websocket"], check=False).returncode:
+        return False, "kennet-websocket service is inactive"
+    listeners = subprocess.run(["ss", "-Hlnt"], text=True, capture_output=True, check=False).stdout
+    if not any(line.split()[3].endswith(":10015") for line in listeners.splitlines() if len(line.split()) > 3):
+        return False, "Expected WebSocket bridge listener 127.0.0.1:10015 is missing"
+    return True, "WebSocket bridge is active on 127.0.0.1:10015"

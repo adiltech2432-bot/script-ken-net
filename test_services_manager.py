@@ -11,6 +11,11 @@ from types import SimpleNamespace
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_ssh_password_prompt_rejects_short_password_before_confirmation(self):
+        with patch.object(services.getpass, "getpass", side_effect=["short", "correct-horse", "correct-horse"]) as prompt:
+            self.assertEqual(services._prompt_ssh_password(), "correct-horse")
+        self.assertEqual(prompt.call_count, 3)
+
     def test_xray_installer_validates_and_starts_service(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(services, "XRAY_CONFIG", __import__("pathlib").Path(temp) / "config.json"), \
              patch("builtins.input", return_value="YES"), patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \

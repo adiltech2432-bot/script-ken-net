@@ -11,6 +11,18 @@ import websocket_tunnel
 
 
 class GatewayRenderingTests(unittest.TestCase):
+    def test_public_xray_gateway_readiness_does_not_require_ssh_websocket_bridge(self):
+        from types import SimpleNamespace
+
+        listeners = "".join(f"LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:*\n"
+                            for port in (80, 443, 8080, 8443))
+        with patch.object(gateway_manager.subprocess, "run", side_effect=[
+                SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=0, stdout=listeners)]):
+            ready, detail = gateway_manager.is_ready()
+        self.assertTrue(ready)
+        self.assertIn("public HTTP/TLS gateway", detail)
+
     def test_haproxy_claims_public_http_and_routes_openvpn_before_tls(self):
         config = gateway_manager.render_haproxy()
         self.assertIn("bind :80", config)

@@ -291,8 +291,9 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
     try:
         import gateway_manager
         gateway_ready = gateway_manager.is_ready()[0]
+        websocket_ready = gateway_manager.websocket_bridge_ready()[0]
     except (ImportError, OSError, ValueError):
-        gateway_ready = False
+        gateway_ready = websocket_ready = False
     try:
         import udp_custom_manager
         udp_ready = udp_custom_manager.ready()[0]
@@ -322,11 +323,11 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("Port OpenSSH", ssh_ports),
         ("Port UDP SSH", "Not configured"),
         ("Port Dropbear", "109, 143/TCP" if dropbear else "Not installed"),
-        ("Port Dropbear WS", "443, 109/TCP" if dropbear and gateway_ready else "Not configured"),
-        ("Port SSH WS SSL", "443/TCP" if gateway_ready else "Not configured"),
-        ("Port SSH WS", "80/TCP" if gateway_ready else "Not configured"),
+        ("Port Dropbear WS", "443, 109/TCP" if dropbear and gateway_ready and websocket_ready else "Not configured"),
+        ("Port SSH WS SSL", "443/TCP" if gateway_ready and websocket_ready else "Not configured"),
+        ("Port SSH WS", "80/TCP" if gateway_ready and websocket_ready else "Not configured"),
         ("Port SSL/TLS", "443/TCP" if gateway_ready else "Not configured"),
-        ("Port OpenVPN WS SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
+        ("Port OpenVPN WS SSL", "443/TCP" if ovpn_tcp and gateway_ready and websocket_ready else "Not configured"),
         ("Port OpenVPN SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
         ("Port OpenVPN TCP", "443, 1194/TCP" if ovpn_tcp else "Not installed"),
         ("Port OpenVPN UDP", "2200/UDP" if ovpn_udp else "Not installed"),
@@ -334,21 +335,24 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("BadVPN UDP", ", ".join(badvpn) if badvpn else "Not installed"),
         ("DNSTT public key", dns_public_key),
         ("UDP Custom", f"{domain}:1-65535@{username}:{password or '<password not retrievable>'}" if udp_ready else "Not installed"),
-        ("SSH WebSocket", f"{domain}:80@{username}:{password or '<password not retrievable>'}" if gateway_ready else "Not configured"),
-        ("Payload WSS", f"GET /ssh-ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]" if gateway_ready else "Not configured"),
+        ("SSH WebSocket", f"{domain}:80@{username}:{password or '<password not retrievable>'}" if gateway_ready and websocket_ready else "Not configured"),
+        ("Payload WSS", f"GET /ssh-ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]" if gateway_ready and websocket_ready else "Not configured"),
         ("Allowed IPs", "Unlimited" if not int(record.get("max_ips", 0)) else str(record.get("max_ips"))),
         ("Expired", expiry),
     ]
 
 
 def _prompt_ssh_password() -> str:
-    first = getpass.getpass("Password (input hidden): ")
-    second = getpass.getpass("Confirm password: ")
-    if first != second:
-        raise ValueError("Passwords do not match")
-    if len(first) < 8 or any(char in first for char in "\r\n:"):
-        raise ValueError("Use at least 8 characters; line breaks and ':' are not allowed")
-    return first
+    print("SSH password rules: at least 8 characters; ':' and line breaks are not allowed.")
+    while True:
+        first = getpass.getpass("Password (input hidden): ")
+        if len(first) < 8 or any(char in first for char in "\r\n:"):
+            print("Invalid password. Use at least 8 characters and avoid ':' or line breaks.")
+            continue
+        second = getpass.getpass("Confirm password: ")
+        if first == second:
+            return first
+        print("Passwords do not match. Please try again.")
 
 
 def install_expiry_timer() -> None:

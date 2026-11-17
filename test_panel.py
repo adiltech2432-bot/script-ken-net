@@ -21,9 +21,18 @@ class PanelTests(unittest.TestCase):
         p = next(x for x in panel.PROTOCOLS if x.key == "vless")
         with patch.object(panel, "systemd_active", return_value=True), patch.object(
             panel.Path, "is_file", return_value=True
-        ):
+        ), patch.object(gateway_manager, "is_ready", return_value=(True, "gateway ready")):
             state, _ = panel.protocol_state(p)
         self.assertEqual(state, "Active")
+
+    def test_xray_state_reports_missing_public_gateway(self):
+        p = next(x for x in panel.PROTOCOLS if x.key == "vless")
+        with patch.object(panel, "systemd_active", return_value=True), patch.object(
+            gateway_manager, "is_ready", return_value=(False, "listener 443 missing")
+        ):
+            state, detail = panel.protocol_state(p)
+        self.assertEqual(state, "Partially active")
+        self.assertIn("listener 443 missing", detail)
 
     def test_dnstt_is_not_reported_as_ready_without_detected_services(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "dnstt")
