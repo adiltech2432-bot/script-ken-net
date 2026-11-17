@@ -394,11 +394,13 @@ def menu() -> None:
             if choice in {"0", "00"}:
                 return
             if choice == "1":
-                if install_tools():
-                    print("Installed dnstt-server and dnstt-client in /usr/local/bin")
-                if input("Install the DNSTT DNS router now? Type YES: ").strip() == "YES":
-                    install_router()
-                    print("DNS router installed.")
+                  tools_ready = all(Path("/usr/local/bin", name).is_file()
+                                    for name in ("dnstt-server", "dnstt-client"))
+                  if tools_ready:
+                      install_router()
+                      print("DNSTT DNS router installed and running.")
+                  elif install_tools():
+                      print("Installed dnstt-server and dnstt-client. Next choose 02 to configure the DNS zone, then 01 again to install the router.")
             elif choice == "2":
                 configure()
                 print(f"Configuration saved: {CONFIG}")
