@@ -23,22 +23,43 @@ python3 -m py_compile "${SOURCE_DIR}/panel.py" "${SOURCE_DIR}/services_manager.p
   "${SOURCE_DIR}/gateway_manager.py" "${SOURCE_DIR}/websocket_tunnel.py" "${SOURCE_DIR}/openvpn_manager.py" "${SOURCE_DIR}/ssh_ip_limit.py"
 
 install -d -o root -g root -m 0755 "${DEST_DIR}"
+GATEWAY_CHANGED=0
+BRIDGE_CHANGED=0
+if [[ -f "${DEST_DIR}/gateway_manager.py" ]] && ! cmp -s "${SOURCE_DIR}/gateway_manager.py" "${DEST_DIR}/gateway_manager.py"; then
+  GATEWAY_CHANGED=1
+fi
+if [[ -f /usr/local/lib/kennet-panel/websocket_tunnel.py ]] && ! cmp -s "${SOURCE_DIR}/websocket_tunnel.py" /usr/local/lib/kennet-panel/websocket_tunnel.py; then
+  BRIDGE_CHANGED=1
+elif [[ ! -f /usr/local/lib/kennet-panel/websocket_tunnel.py ]] && systemctl cat kennet-websocket.service >/dev/null 2>&1; then
+  BRIDGE_CHANGED=1
+fi
 for file in "${REQUIRED[@]}"; do
   install -o root -g root -m 0644 "${SOURCE_DIR}/${file}" "${DEST_DIR}/${file}"
 done
 
-# The public gateway runs a separate copy of the WebSocket bridge. Keep that
-# runtime copy in sync during upgrades; updating /opt alone leaves the old
-# daemon running (which rejects the legacy HTTP Custom ACL handshake).
-if command -v systemctl >/dev/null 2>&1 && systemctl cat kennet-websocket.service >/dev/null 2>&1; then
-  install -d -o root -g root -m 0755 /usr/local/lib/kennet-panel
-  install -o root -g root -m 0755 "${SOURCE_DIR}/websocket_tunnel.py" \
-    /usr/local/lib/kennet-panel/websocket_tunnel.py
-  systemctl restart kennet-websocket.service
+# Make sure expiry enforcement is enabled on existing installations and fresh
+# hosts, including hosts that already have managed accounts.
+python3 - "${DEST_DIR}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import services_manager
+services_manager.install_expiry_timer()
+PY
 
-  # Re-render the existing managed gateway so transport fixes reach Nginx and
-  # HAProxy too. Skip clean hosts or installations without a domain certificate.
-  python3 - "${DEST_DIR}" <<'PY'
+# Restart the WebSocket bridge only when its runtime code changed. This keeps
+# unrelated account-manager updates from interrupting working SSH transports.
+if command -v systemctl >/dev/null 2>&1 && systemctl cat kennet-websocket.service >/dev/null 2>&1; then
+  if [[ "${BRIDGE_CHANGED}" -eq 1 ]]; then
+    install -d -o root -g root -m 0755 /usr/local/lib/kennet-panel
+    install -o root -g root -m 0755 "${SOURCE_DIR}/websocket_tunnel.py" \
+      /usr/local/lib/kennet-panel/websocket_tunnel.py
+    systemctl restart kennet-websocket.service
+  fi
+
+  # Re-render only when the gateway implementation itself changed. Account
+  # expiry/UI updates leave existing SSH-WS/TLS/Trojan/VLESS routing untouched.
+  if [[ "${GATEWAY_CHANGED}" -eq 1 ]]; then
+    python3 - "${DEST_DIR}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -51,6 +72,7 @@ certificate = Path(f"/etc/letsencrypt/live/{domain}") if domain else None
 if certificate and (certificate / "fullchain.pem").is_file() and (certificate / "privkey.pem").is_file():
     gateway_manager.install()
 PY
+  fi
 fi
 
 # An Xray daemon can be healthy while forwarding nowhere if its existing

@@ -348,6 +348,7 @@ def remove_peer(interface: str, username: str) -> None:
 
 def menu() -> None:
     import terminal_ui
+    import services_manager
     interface = input("WireGuard interface name [wg0]: ").strip() or "wg0"
     while True:
         terminal_ui.option_cards("WIREGUARD ACCOUNT MANAGER", [("01", "Install / configure server"),
@@ -396,15 +397,35 @@ def menu() -> None:
                 print(f"WireGuard {interface}: {result.stdout.strip() or 'inactive'}")
             elif choice == "7":
                 purge_expired()
-                for name, record in sorted(list_peers().items()):
-                    print(f"- {name} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+                peers = list_peers()
+                rows = []
+                for name, record in sorted(peers.items()):
+                    details = peer_details(interface, name)
+                    rows.append({"name": name, "connection": "RECENT" if details.get("connected") else "OFFLINE",
+                        "status": terminal_ui.expiry_status(record.get("expires_at")),
+                        "expires": record.get("expires_at", "unknown"),
+                        "details": f"{record.get('address', 'no address')} · {'TRIAL' if record.get('trial') else 'REGULAR'}"})
+                for record in services_manager.expired_accounts("wireguard"):
+                    if record.get("username") not in peers:
+                        rows.append({"name": record.get("username", "?"), "connection": "OFFLINE", "status": "EXPIRED",
+                            "expires": record.get("expires_at", "unknown"), "details": "Peer revoked automatically"})
+                terminal_ui.account_roster("WIREGUARD ACCOUNTS", rows)
             elif choice == "8":
+                purge_expired()
                 names = sorted(list_peers())
-                print("WireGuard peers and connection state:")
+                rows = []
                 for name in names:
                     details = peer_details(interface, name)
-                    print(f"- {name}: {'CONNECTED (handshake within 3 minutes)' if details.get('connected') else 'offline'}")
-                if not names: print("- none")
+                    rows.append({"name": name, "connection": "RECENT" if details.get("connected") else "OFFLINE",
+                        "status": terminal_ui.expiry_status(details.get("expires_at")),
+                        "expires": details.get("expires_at", "unknown"),
+                        "details": "Recent handshake within 3 minutes" if details.get("connected") else "No recent handshake"})
+                for record in services_manager.expired_accounts("wireguard"):
+                    if record.get("username") not in names:
+                        rows.append({"name": record.get("username", "?"), "connection": "OFFLINE", "status": "EXPIRED",
+                            "expires": record.get("expires_at", "unknown"), "details": "Peer revoked automatically"})
+                terminal_ui.account_roster("WIREGUARD LIVE CONNECTIONS", rows,
+                    note="WireGuard is connectionless; RECENT means a handshake was seen within the last 3 minutes, not a live device count.")
             elif choice == "9":
                 name = terminal_ui.select_account("WIREGUARD", sorted(list_peers()))
                 if name is None: continue

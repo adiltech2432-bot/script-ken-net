@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import base64
 import textwrap
+from datetime import date
 
 CYAN = "\033[96m"
 BLUE = "\033[94m"
@@ -70,8 +71,10 @@ def select_account(title: str, names: list[str]) -> str | None:
         print(f"{title}: no accounts are registered.")
         return None
     names = sorted(set(names), key=str.casefold)
-    account_options = [(f"{index:02}", name) for index, name in enumerate(names, 1)]
-    option_cards(f"{title} — SELECT ACCOUNT", account_options, columns=2, color=CYAN)
+    account_roster(title + " — SELECT ACCOUNT", [
+        {"name": name, "connection": "—", "status": "SELECT", "expires": "—"}
+        for name in names
+    ])
     print(f"{YELLOW}[0] Cancel{RESET}")
     choice = input("Select account number: ").strip()
     if choice in {"", "0"}:
@@ -84,6 +87,45 @@ def select_account(title: str, names: list[str]) -> str | None:
         return None
     print("That username is not in the registered account list.")
     return None
+
+
+def expiry_status(expires: object) -> str:
+    """Return a date-based status without claiming that a session is online."""
+    if not expires:
+        return "NO EXPIRY"
+    try:
+        return "EXPIRED" if date.fromisoformat(str(expires)) < date.today() else "ACTIVE"
+    except ValueError:
+        return "UNKNOWN"
+
+
+def account_roster(title: str, rows: list[dict[str, object]], *, note: str = "") -> None:
+    """Render compact, numbered account rows with clear connection and expiry state."""
+    heading(title, CYAN)
+    if not rows:
+        print(f"{YELLOW}No accounts are registered.{RESET}")
+        return
+    width = max(64, min(shutil.get_terminal_size((100, 24)).columns, 120))
+    name_width = max(16, min(28, width - 63))
+    print(f"{BLUE}{'#':>3}  {'ACCOUNT':<{name_width}}  {'CONNECTION':<12}  {'STATUS':<10}  {'VALID UNTIL':<10}{RESET}")
+    print(f"{BLUE}{'─' * min(width - 4, name_width + 48)}{RESET}")
+    for index, row in enumerate(rows, 1):
+        name = str(row.get("name", "?"))
+        connection = str(row.get("connection", "UNKNOWN")).upper()
+        status = str(row.get("status", expiry_status(row.get("expires")))).upper()
+        expires = str(row.get("expires", "—"))
+        if len(name) > name_width:
+            name = name[:name_width - 1] + "…"
+        if len(expires) > 10:
+            expires = expires[:10]
+        connection_color = GREEN if connection in {"ONLINE", "CONNECTED", "RUNNING", "RECENT"} or connection.endswith(" SESSIONS") else YELLOW if connection in {"UNKNOWN", "N/A"} else RESET
+        status_color = GREEN if status == "ACTIVE" else MAGENTA if status == "EXPIRED" else YELLOW
+        print(f"{CYAN}{index:>3}{RESET}  {name:<{name_width}}  {connection_color}{connection:<12}{RESET}  {status_color}{status:<10}{RESET}  {expires:<10}")
+        detail = row.get("details")
+        if detail:
+            print(f"     {YELLOW}↳ {detail}{RESET}")
+    if note:
+        print(f"{YELLOW}{note}{RESET}")
 
 
 def copy_prompt(items: list[tuple[str, str]]) -> None:

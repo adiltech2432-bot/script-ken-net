@@ -68,11 +68,19 @@ def menu() -> None:
                 username=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
                 if username is None: continue
                 if input(f"Delete {username}? Type YES: ").strip()=="YES": services_manager.ssh_remove(username)
-            elif choice == "7": print("Accounts:", ", ".join(services_manager.ssh_list()) or "none")
+            elif choice == "7":
+                services_manager.purge_expired()
+                names = services_manager.ssh_list()
+                rows = services_manager.account_roster_rows("ssh", names,
+                    connections=services_manager.active_connections("ssh"))
+                terminal_ui.account_roster("DROPBEAR / SSH ACCOUNTS", rows,
+                    note="SSH and Dropbear share Linux accounts; the online count includes both daemons.")
             elif choice == "8":
                 sessions = services_manager.active_connections("ssh")
-                print("Dropbear/SSH registered accounts and sessions:")
-                for name in services_manager.ssh_list(): print(f"- {name}: {sessions.get(name, 0)}")
+                names = services_manager.ssh_list()
+                rows = services_manager.account_roster_rows("ssh", names, connections=sessions)
+                terminal_ui.account_roster("DROPBEAR / SSH LIVE CONNECTIONS", rows,
+                    note="Counts are established SSH TCP sessions, including both OpenSSH and Dropbear.")
             elif choice == "9":
                 name=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
                 if name is not None: services_manager.show_account_details("dropbear", name)

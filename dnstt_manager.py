@@ -383,6 +383,7 @@ def remove_account(username: str) -> None:
 
 def menu() -> None:
     import terminal_ui
+    import services_manager
     while True:
         terminal_ui.option_cards("DNSTT ACCOUNT MANAGER", [("01", "Install tools / router"),
             ("02", "Configure DNS domain"), ("03", "Router status"),
@@ -440,15 +441,32 @@ def menu() -> None:
                     print("Tunnel stopped; key and service removed.")
             elif choice == "8":
                 purge_expired()
-                for username, record in sorted(list_accounts().items()):
-                    print(f"- {username} | {record['domain']} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+                accounts = list_accounts()
+                rows = []
+                for username, record in sorted(accounts.items()):
+                    result = subprocess.run(["systemctl", "is-active", record["service"]], capture_output=True, text=True)
+                    running = result.stdout.strip() == "active"
+                    rows.append({"name": username, "connection": "RUNNING" if running else "OFFLINE",
+                        "status": terminal_ui.expiry_status(record.get("expires_at")),
+                        "expires": record.get("expires_at", "unknown"),
+                        "details": f"{record.get('domain', 'unknown')} · endpoint service state; clients are not attributable"})
+                for record in services_manager.expired_accounts("dnstt"):
+                    if record.get("username") not in accounts:
+                        rows.append({"name": record.get("username", "?"), "connection": "OFFLINE", "status": "EXPIRED",
+                            "expires": record.get("expires_at", "unknown"), "details": "Endpoint revoked automatically"})
+                terminal_ui.account_roster("DNSTT ENDPOINTS", rows,
+                    note="RUNNING describes the endpoint service, not a count of connected client devices.")
             elif choice == "9":
                 accounts = sorted(list_accounts().items())
-                print("DNSTT endpoints (service state; client sessions cannot be attributed):")
+                rows = []
                 for username, record in accounts:
                     result = subprocess.run(["systemctl", "is-active", record["service"]], capture_output=True, text=True)
-                    print(f"- {username}: service {result.stdout.strip() or 'inactive'} (DNSTT cannot count authenticated users)")
-                if not accounts: print("- none")
+                    rows.append({"name": username, "connection": "RUNNING" if result.stdout.strip() == "active" else "OFFLINE",
+                        "status": terminal_ui.expiry_status(record.get("expires_at")),
+                        "expires": record.get("expires_at", "unknown"),
+                        "details": "DNSTT endpoint service; client sessions are not countable"})
+                terminal_ui.account_roster("DNSTT ENDPOINT STATUS", rows,
+                    note="DNSTT does not authenticate clients, so per-user connected-device counts are unavailable.")
             elif choice == "10":
                 username = terminal_ui.select_account("DNSTT", sorted(list_accounts()))
                 if username is None: continue

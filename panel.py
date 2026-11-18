@@ -244,10 +244,10 @@ def show_status() -> None:
 
 
 def choose_protocol() -> Protocol | None:
-    for i, p in enumerate(PROTOCOLS, 1):
-        print(f"{i}. {p.title}")
+    import terminal_ui
+    terminal_ui.option_cards("PROTOCOLS", [(f"{i:02}", p.title) for i, p in enumerate(PROTOCOLS, 1)] + [("00", "Return")], columns=2)
     raw = input("Select a protocol (0 to return): ").strip()
-    if raw == "0":
+    if raw in {"0", "00"}:
         return None
     try:
         index = int(raw) - 1

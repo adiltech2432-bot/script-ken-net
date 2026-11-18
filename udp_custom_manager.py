@@ -149,14 +149,19 @@ def menu() -> None:
             elif choice == "5":
                 name = input("Username: ").strip(); services_manager.show_account_details("udp", name)
             elif choice == "7":
-                for name in services_manager.local_user_list("udp"):
-                    print(services_manager.account_details("udp", name))
-            elif choice == "8":
-                sessions = services_manager.active_connections("udp")
+                services_manager.purge_expired()
                 names = services_manager.local_user_list("udp")
-                print("Registered UDP-Custom accounts and sessions:")
-                for name in names: print(f"- {name}: {sessions.get(name, 0)}")
-                if not names: print("- none")
+                rows = services_manager.account_roster_rows("udp", names,
+                    connection_unknown="UDP-Custom does not expose authenticated sessions per username")
+                terminal_ui.account_roster("UDP CUSTOM ACCOUNTS", rows,
+                    note="Per-account device connection counts are unavailable in the upstream UDP-Custom server.")
+            elif choice == "8":
+                services_manager.purge_expired()
+                names = services_manager.local_user_list("udp")
+                rows = services_manager.account_roster_rows("udp", names,
+                    connection_unknown="Not available from UDP-Custom")
+                terminal_ui.account_roster("UDP CUSTOM LIVE CONNECTIONS", rows,
+                    note="The UDP-Custom protocol does not report per-account connected devices.")
             else:
                 print("Invalid selection")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

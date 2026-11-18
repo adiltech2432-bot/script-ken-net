@@ -11,6 +11,82 @@ from types import SimpleNamespace
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_ssh_session_counts_are_per_account_tcp_sessions(self):
+        sockets = """ESTAB 0 0 192.0.2.10:22 198.51.100.7:41001 users:((\"sshd\",pid=120,fd=3))
+ESTAB 0 0 192.0.2.10:22 198.51.100.7:41002 users:((\"sshd\",pid=121,fd=3))
+ESTAB 0 0 192.0.2.10:22 198.51.100.8:41003 users:((\"sshd\",pid=122,fd=3))
+"""
+        processes = """alice 120 sshd: alice@notty
+alice 121 sshd: alice@pts/0
+bob 122 sshd: bob@notty
+"""
+        def run(command, **_kwargs):
+            return SimpleNamespace(stdout=sockets if command[0] == "ss" else processes)
+
+        with patch.object(services, "ssh_list", return_value=["alice", "bob"]), \
+             patch.object(services.subprocess, "run", side_effect=run):
+            counts = services.ssh_session_counts()
+            sources = services.ssh_session_ips()
+
+        self.assertEqual(counts, {"alice": 2, "bob": 1})
+        self.assertEqual(sources, {"alice": ["198.51.100.7"], "bob": ["198.51.100.8"]})
+
+    def test_expiry_purge_locks_and_removes_expired_ssh_account_and_archives_it(self):
+        from datetime import date, timedelta
+        from pathlib import Path
+
+        old = (date.today() - timedelta(days=1)).isoformat()
+        data = {"accounts": {"alice": {"protocol": "ssh", "expires_at": old, "max_ips": 2}}}
+        with patch.object(services, "state", return_value=data), \
+             patch.object(services, "_expire_linux_user") as expire_user, \
+             patch.object(services, "_archive_expired") as archive, \
+             patch.object(services, "_atomic") as atomic, \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", return_value=[]), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]), \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]):
+            expired = services.purge_expired()
+
+        self.assertEqual(expired, ["alice"])
+        expire_user.assert_called_once_with("alice")
+        archive.assert_called_once_with("ssh", "alice", data["accounts"].get("alice", {"protocol": "ssh", "expires_at": old, "max_ips": 2}))
+        self.assertFalse(data["accounts"])
+        self.assertEqual(atomic.call_args.args[0], services.STATE)
+
+    def test_expiry_timer_checks_accounts_every_minute(self):
+        captured = {}
+
+        def remember(path, contents, mode=0o600):
+            captured[str(path)] = contents
+
+        with patch.object(services, "_atomic", side_effect=remember), patch.object(services, "_run"):
+            services.install_expiry_timer()
+
+        timer = next(text for path, text in captured.items() if path.endswith("kennet-account-expiry.timer"))
+        self.assertIn("OnUnitActiveSec=1min", timer)
+
+    def test_expired_linux_login_is_locked_and_sessions_are_terminated_before_deletion(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(services.subprocess, "run", side_effect=run), \
+             patch.object(services.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            services._expire_linux_user("alice")
+
+        commands = [command for command, _kwargs in calls]
+        self.assertEqual(commands, [
+            ["id", "-u", "alice"], ["usermod", "--lock", "alice"],
+            ["chage", "--expiredate", "0", "alice"],
+            ["loginctl", "terminate-user", "alice"], ["pkill", "-KILL", "-u", "alice"],
+            ["userdel", "-r", "alice"],
+        ])
+        self.assertTrue(all(kwargs.get("check") is True for _command, kwargs in calls[1:3] + calls[-1:]))
+
     def test_ssh_password_prompt_rejects_short_password_before_confirmation(self):
         with patch.object(services.getpass, "getpass", side_effect=["short", "correct-horse", "correct-horse"]) as prompt:
             self.assertEqual(services._prompt_ssh_password(), "correct-horse")

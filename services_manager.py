@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 STATE = Path("/etc/kennet-panel/services.json")
+EXPIRED_STATE = Path("/etc/kennet-panel/expired-accounts.json")
 XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", re.I)
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
@@ -62,6 +63,76 @@ def _atomic(path: Path, text: str, mode: int = 0o600) -> None:
 
 def state() -> dict:
     return json.loads(STATE.read_text()) if STATE.exists() else {"domain": "", "accounts": {}}
+
+
+def _archive_expired(protocol: str, username: str, record: dict) -> None:
+    """Keep non-secret expiry metadata so lists can continue to show EXPIRED."""
+    try:
+        archived = json.loads(EXPIRED_STATE.read_text(encoding="utf-8")) if EXPIRED_STATE.exists() else {}
+    except (OSError, ValueError):
+        archived = {}
+    key = f"{protocol}:{username}"
+    archived[key] = {"protocol": protocol, "username": username,
+                     "expires_at": record.get("expires_at", "unknown"),
+                     "expired_at": dt.date.today().isoformat(),
+                     "trial": bool(record.get("trial"))}
+    _atomic(EXPIRED_STATE, json.dumps(archived, indent=2) + "\n")
+
+
+def expired_accounts(protocol: str) -> list[dict]:
+    try:
+        archived = json.loads(EXPIRED_STATE.read_text(encoding="utf-8")) if EXPIRED_STATE.exists() else {}
+    except (OSError, ValueError):
+        return []
+    return sorted((record for record in archived.values()
+                   if record.get("protocol") == protocol), key=lambda item: item.get("username", "").casefold())
+
+
+def account_roster_rows(protocol: str, names: list[str], *, connections: dict[str, int] | None = None,
+                        connection_unknown: str = "") -> list[dict[str, object]]:
+    """Build truthful per-account rows, including retained expiry history."""
+    import terminal_ui
+    data = state().get("accounts", {})
+    active_names = set(names)
+    rows: list[dict[str, object]] = []
+    for username in sorted(active_names, key=str.casefold):
+        record = data.get(username, {})
+        count = (connections or {}).get(username)
+        connection = f"{count} SESSIONS" if count else ("OFFLINE" if connections is not None else "UNKNOWN")
+        details = "TRIAL account" if record.get("trial") else "Regular account"
+        if record.get("max_ips"):
+            details += f" · IP limit {record['max_ips']}"
+        if connection_unknown:
+            details = connection_unknown
+        rows.append({"name": username, "connection": connection,
+                     "status": terminal_ui.expiry_status(record.get("expires_at")),
+                     "expires": record.get("expires_at", "unknown"), "details": details})
+    for record in expired_accounts(protocol):
+        username = str(record.get("username", ""))
+        if username in active_names:
+            continue
+        rows.append({"name": username, "connection": "OFFLINE", "status": "EXPIRED",
+                     "expires": record.get("expires_at", "unknown"),
+                     "details": "Access revoked automatically"})
+    return sorted(rows, key=lambda row: str(row["name"]).casefold())
+
+
+def _expire_linux_user(username: str) -> None:
+    """Lock a managed Unix login and terminate its existing sessions before removal."""
+    if not NAME_RE.fullmatch(username):
+        raise ValueError("Invalid managed Linux username in expiry state")
+    exists = subprocess.run(["id", "-u", username], capture_output=True, check=False)
+    if exists.returncode:
+        return
+    # Lock and expire first. If either command fails, keep the record so the
+    # timer retries instead of silently reporting a live account as revoked.
+    subprocess.run(["usermod", "--lock", username], capture_output=True, check=True)
+    subprocess.run(["chage", "--expiredate", "0", username], capture_output=True, check=True)
+    if shutil.which("loginctl"):
+        subprocess.run(["loginctl", "terminate-user", username], capture_output=True, check=False)
+    if shutil.which("pkill"):
+        subprocess.run(["pkill", "-KILL", "-u", username], capture_output=True, check=False)
+    subprocess.run(["userdel", "-r", username], capture_output=True, check=True)
 
 
 def set_domain(domain: str, *, issue_certificate: bool = True) -> None:
@@ -371,8 +442,8 @@ ExecStart=/usr/bin/python3 /opt/kennet-panel/services_manager.py --expire
     timer = """[Unit]
 Description=Periodic Kennet account expiry check
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=1min
+OnUnitActiveSec=1min
 Persistent=true
 [Install]
 WantedBy=timers.target
@@ -399,7 +470,7 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         if not is_expired:
             continue
         if record.get("protocol") in {"ssh", "udp"}:
-            subprocess.run(["userdel", "-r", username], capture_output=True, check=False)
+            _expire_linux_user(username)
         elif record.get("protocol") in XRAY_PORTS:
             xray_expired.append((username, record["protocol"]))
         else:
@@ -419,22 +490,36 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
                         if client.get("email") not in usernames]
         _write_xray(cfg)
     for username in expired:
+        record = dict(data["accounts"].get(username, {}))
+        _archive_expired(record.get("protocol", "unknown"), username, record)
         data["accounts"].pop(username, None)
     if expired:
         _atomic(STATE, json.dumps(data, indent=2) + "\n")
     try:
         import wireguard_manager
-        expired.extend("wireguard:" + name for name in wireguard_manager.purge_expired(today))
+        peers = wireguard_manager.list_peers()
+        removed = wireguard_manager.purge_expired(today)
+        for name in removed:
+            _archive_expired("wireguard", name, peers.get(name, {}))
+        expired.extend("wireguard:" + name for name in removed)
     except (ImportError, FileNotFoundError, RuntimeError, ValueError):
         pass
     try:
         import dnstt_manager
-        expired.extend("dnstt:" + name for name in dnstt_manager.purge_expired(today))
+        accounts = dnstt_manager.list_accounts()
+        removed = dnstt_manager.purge_expired(today)
+        for name in removed:
+            _archive_expired("dnstt", name, accounts.get(name, {}))
+        expired.extend("dnstt:" + name for name in removed)
     except (ImportError, FileNotFoundError, RuntimeError, ValueError):
         pass
     try:
         import openvpn_manager
-        expired.extend("openvpn:" + name for name in openvpn_manager.purge_expired(today))
+        accounts = openvpn_manager._account_state().get("accounts", {})
+        removed = openvpn_manager.purge_expired(today)
+        for name in removed:
+            _archive_expired("openvpn", name, accounts.get(name, {}))
+        expired.extend("openvpn:" + name for name in removed)
     except (ImportError, FileNotFoundError, RuntimeError, ValueError):
         pass
     return expired
@@ -449,14 +534,7 @@ def account_details(protocol: str, username: str) -> dict:
 
 def active_connections(protocol: str) -> dict[str, int]:
     if protocol in {"ssh", "udp"}:
-        result = subprocess.run(["who"], capture_output=True, text=True, check=False)
-        counts: dict[str, int] = {}
-        managed = set(ssh_list() if protocol == "ssh" else udp_list())
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if parts and parts[0] in managed:
-                counts[parts[0]] = counts.get(parts[0], 0) + 1
-        return counts
+        return ssh_session_counts() if protocol == "ssh" else {}
     if protocol in XRAY_PORTS:
         rows = set()
         for port, _network, _path in XRAY_LAYOUT[protocol]:
@@ -467,18 +545,58 @@ def active_connections(protocol: str) -> dict[str, int]:
 
 
 def ssh_session_ips() -> dict[str, list[str]]:
-    result = subprocess.run(["who", "-u"], capture_output=True, text=True, check=False)
-    managed = set(ssh_list())
+    sessions = ssh_session_sources()
+    result: dict[str, list[str]] = {}
+    for username, peers in sessions.items():
+        hosts = set()
+        for peer in peers:
+            if peer.startswith("[") and "]:" in peer:
+                hosts.add(peer[1:peer.rfind("]:")])
+            else:
+                hosts.add(peer.rpartition(":")[0] or peer)
+        result[username] = sorted(hosts)
+    return result
+
+
+def ssh_session_sources() -> dict[str, list[str]]:
+    """Map established SSH TCP sessions to login users and remote endpoints."""
     sessions: dict[str, set[str]] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if not parts or parts[0] not in managed:
+    managed = set(ssh_list())
+    if not managed:
+        return {}
+    sockets = subprocess.run(["ss", "-Htnp", "state", "established"], capture_output=True, text=True, check=False)
+    processes = subprocess.run(["ps", "-eo", "user=,pid=,args="], capture_output=True, text=True, check=False)
+    pid_users: dict[str, str] = {}
+    for line in processes.stdout.splitlines():
+        match = re.match(r"\s*(\S+)\s+(\d+)\s+.*?sshd:\s+([A-Za-z0-9_]{3,32})@", line)
+        if match:
+            pid_users[match.group(2)] = match.group(3)
+        else:
+            match = re.match(r"\s*(\S+)\s+(\d+)\s+", line)
+            if match:
+                pid_users[match.group(2)] = match.group(1)
+    for line in sockets.stdout.splitlines():
+        pids = re.findall(r"pid=(\d+)", line)
+        user = next((pid_users.get(pid) for pid in pids if pid_users.get(pid) in managed), None)
+        if not user:
             continue
-        match = re.search(r"\(([^()]*)\)\s*$", line)
-        host = match.group(1).strip() if match else "Unknown remote IP"
-        if host and not host.startswith(":"):
-            sessions.setdefault(parts[0], set()).add(host)
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        peer = fields[4]
+        if peer.startswith("[") and "]:" in peer:
+            host = peer[1:peer.rfind("]:")]
+        else:
+            host = peer.rpartition(":")[0]
+        # Keep the remote source port: two devices behind one NAT share an IP,
+        # but have distinct TCP sessions and therefore distinct source ports.
+        sessions.setdefault(user, set()).add(peer or host)
     return {username: sorted(hosts) for username, hosts in sessions.items()}
+
+
+def ssh_session_counts() -> dict[str, int]:
+    """Count established SSH sessions per account (not unique physical devices)."""
+    return {username: len(sources) for username, sources in ssh_session_sources().items()}
 
 
 def xray_renew(protocol: str, username: str, days: int) -> None:
@@ -1090,24 +1208,30 @@ def account_menu(protocol: str) -> None:
             elif choice == "7":
                 purge_expired()
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
-                print(f"{title} accounts ({len(names)}):")
-                for username in names:
-                    record = account_details(protocol, username)
-                    print(f"- {username} | expires {record.get('expires_at', 'unknown')} | {'TRIAL' if record.get('trial') else 'regular'}")
+                connections = active_connections("ssh") if protocol == "ssh" else None
+                rows = account_roster_rows(protocol, names, connections=connections,
+                    connection_unknown=("Per-account device sessions are unavailable through the shared Xray gateway"
+                                         if protocol != "ssh" else ""))
+                import terminal_ui
+                terminal_ui.account_roster(f"{title} ACCOUNTS", rows,
+                    note="SSH rows count live TCP sessions; Xray user sessions are not exposed per account by the current gateway.")
             elif choice == "8":
+                purge_expired()
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
-                sessions = active_connections(protocol)
-                print(f"Registered {title} accounts ({len(names)}): " + (", ".join(names) or "none"))
+                import terminal_ui
                 if protocol == "ssh":
+                    connections = active_connections("ssh")
                     ip_sessions = ssh_session_ips()
-                    print("Connected sessions:")
-                    for username in names:
-                        ips = ip_sessions.get(username, [])
-                        print(f"- {username}: {sessions.get(username, 0)} session(s); IPs: {', '.join(ips) or 'none'}")
-                    if not sessions: print("- none detected")
+                    rows = account_roster_rows(protocol, names, connections=connections)
+                    for row in rows:
+                        row["details"] = "Remote IPs: " + (", ".join(ip_sessions.get(str(row["name"]), [])) or "none")
+                    terminal_ui.account_roster(f"{title} LIVE CONNECTIONS", rows,
+                        note="The count is concurrent authenticated TCP sessions, not physical devices; one device may open multiple sessions.")
                 else:
-                    print("Xray active connection total (not unique users): " + str(sessions.get("active connections (not unique users)", 0)))
-                    print("This Xray configuration does not attribute live sessions to individual account names.")
+                    sessions = active_connections(protocol)
+                    rows = account_roster_rows(protocol, names, connection_unknown="Not attributable per account via shared gateway")
+                    terminal_ui.account_roster(f"{title} LIVE CONNECTIONS", rows,
+                        note=f"Xray reports {sessions.get('active connections (not unique users)', 0)} shared inbound connections total; it cannot identify the account/device for each connection in this gateway layout.")
             else:
                 print("Invalid selection.")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:

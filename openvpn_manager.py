@@ -317,14 +317,35 @@ def menu() -> None:
                     ("Account type", "TRIAL" if record.get("trial") else "REGULAR"),
                 ], note="Client profiles contain private keys. Transfer them securely.")
             elif choice == "7":
-                for name, record in _account_state().get("accounts", {}).items():
-                    if record.get("protocol") == "openvpn": print(f"{name} | {record.get('expires_at')} | {record.get('profile_dir')}")
+                services_manager.purge_expired()
+                accounts = {name: item for name, item in _account_state().get("accounts", {}).items()
+                            if item.get("protocol") == "openvpn"}
+                active = set(connected_sessions())
+                rows = [{"name": name, "connection": "ONLINE" if name in active else "OFFLINE",
+                         "status": terminal_ui.expiry_status(record.get("expires_at")),
+                         "expires": record.get("expires_at", "unknown"),
+                         "details": f"Certificate profile: {record.get('profile_dir', 'unknown')}"}
+                        for name, record in sorted(accounts.items())]
+                for record in services_manager.expired_accounts("openvpn"):
+                    if record.get("username") not in accounts:
+                        rows.append({"name": record.get("username", "?"), "connection": "OFFLINE", "status": "EXPIRED",
+                            "expires": record.get("expires_at", "unknown"), "details": "Certificate revoked automatically"})
+                terminal_ui.account_roster("OPENVPN ACCOUNTS", rows)
             elif choice == "8":
+                services_manager.purge_expired()
                 active = set(connected_sessions())
                 names = sorted(name for name, item in _account_state().get("accounts", {}).items() if item.get("protocol") == "openvpn")
-                print("OpenVPN accounts and sessions:")
-                for name in names: print(f"- {name}: {'CONNECTED' if name in active else 'offline'}")
-                if not names: print("- none")
+                records = _account_state().get("accounts", {})
+                rows = [{"name": name, "connection": "ONLINE" if name in active else "OFFLINE",
+                         "status": terminal_ui.expiry_status(records.get(name, {}).get("expires_at")),
+                         "expires": records.get(name, {}).get("expires_at", "unknown"),
+                         "details": "Connected client name from OpenVPN status file"}
+                        for name in names]
+                for record in services_manager.expired_accounts("openvpn"):
+                    if record.get("username") not in names:
+                        rows.append({"name": record.get("username", "?"), "connection": "OFFLINE", "status": "EXPIRED",
+                            "expires": record.get("expires_at", "unknown"), "details": "Certificate revoked automatically"})
+                terminal_ui.account_roster("OPENVPN LIVE CONNECTIONS", rows)
             else: print("Invalid selection")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             print(f"Operation failed: {exc}")
