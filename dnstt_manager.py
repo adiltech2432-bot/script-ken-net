@@ -162,11 +162,6 @@ def install_router() -> None:
     if subprocess.run(["systemctl", "is-active", "--quiet", "server.service"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0:
         raise RuntimeError("An existing server.service is active; migrate only on a separate test VPS to avoid disrupting it")
-    if subprocess.run(["systemctl", "is-active", "--quiet", MUX_UNIT],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0:
-        raise RuntimeError("DNSTT router is already active")
-    if (SYSTEMD / MUX_UNIT).exists():
-        raise FileExistsError(f"Refusing to replace an existing unit: {SYSTEMD / MUX_UNIT}")
     source = Path(__file__).resolve().with_name("dnstt_mux.py")
     if not source.is_file():
         raise FileNotFoundError(f"Router source not found beside manager: {source}")
@@ -188,19 +183,32 @@ def install_router() -> None:
         "ProtectHome=true\nReadOnlyPaths=/etc/kennet-panel\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n"
         "AmbientCapabilities=CAP_NET_BIND_SERVICE\n\n[Install]\nWantedBy=multi-user.target\n"
     )
-    _atomic(SYSTEMD / MUX_UNIT, unit, 0o644)
+    unit_path = SYSTEMD / MUX_UNIT
+    created_unit = not unit_path.exists()
+    if not created_unit:
+        existing_unit = unit_path.read_text(encoding="utf-8")
+        if existing_unit != unit:
+            raise FileExistsError(f"Refusing to replace a non-Ken-net unit: {unit_path}")
+    else:
+        _atomic(unit_path, unit, 0o644)
     try:
         _run(["systemctl", "daemon-reload"])
-        _run(["systemctl", "enable", "--now", MUX_UNIT])
+        active = subprocess.run(["systemctl", "is-active", "--quiet", MUX_UNIT],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        if active:
+            _run(["systemctl", "restart", MUX_UNIT])
+        else:
+            _run(["systemctl", "enable", "--now", MUX_UNIT])
         try:
             import services_manager
             services_manager.open_ports([("udp", int(config.get("dns_listen", "0.0.0.0:53").rsplit(":", 1)[1]))])
         except ImportError:
             pass
     except Exception:
-        subprocess.run(["systemctl", "disable", "--now", MUX_UNIT], capture_output=True, check=False)
-        (SYSTEMD / MUX_UNIT).unlink(missing_ok=True)
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+        if created_unit:
+            subprocess.run(["systemctl", "disable", "--now", MUX_UNIT], capture_output=True, check=False)
+            unit_path.unlink(missing_ok=True)
+            subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
         raise
 
 
