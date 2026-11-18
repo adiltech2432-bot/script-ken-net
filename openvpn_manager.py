@@ -121,11 +121,16 @@ def install() -> None:
     if not (PKI / "ca.crt").is_file():
         _run([EASYRSA, "init-pki"], env=_env())
         _run([EASYRSA, "build-ca", "nopass"], env=_env("Kennet VPN CA"))
+    if not (PKI / "issued" / "server.crt").is_file() or not (PKI / "private" / "server.key").is_file():
         _run([EASYRSA, "build-server-full", "server", "nopass"], env=_env())
+    if not (PKI / "crl.pem").is_file():
         _run([EASYRSA, "gen-crl"], env=_env())
+    if not (PKI / "crl.pem").is_file():
+        raise FileNotFoundError(f"EasyRSA completed without creating {PKI / 'crl.pem'}")
+    if not (ROOT / "tls-crypt.key").is_file():
         _run(["openvpn", "--genkey", "secret", str(ROOT / "tls-crypt.key")])
-        os.chmod(ROOT / "tls-crypt.key", 0o600)
-    _atomic(PKI / "crl.pem", (PKI / "crl.pem").read_text(encoding="utf-8"), 0o644)
+    os.chmod(PKI / "crl.pem", 0o644)
+    os.chmod(ROOT / "tls-crypt.key", 0o600)
     route = _run(["ip", "-o", "route", "get", "1.1.1.1"])
     match = re.search(r"\bdev\s+([A-Za-z0-9_.-]+)", route)
     if not match:
