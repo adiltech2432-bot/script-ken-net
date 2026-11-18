@@ -172,7 +172,11 @@ def install_router() -> None:
         raise FileNotFoundError(f"Router source not found beside manager: {source}")
     app_dir = Path("/opt/kennet-panel")
     app_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
-    shutil.copyfile(source, app_dir / "dnstt_mux.py")
+    router_target = app_dir / "dnstt_mux.py"
+    # The manager is installed in /opt/kennet-panel too, so source and target
+    # are identical on normal installations. Avoid shutil's same-file error.
+    if source.resolve() != router_target.resolve():
+        shutil.copyfile(source, router_target)
     route_data = _routes(config)
     route_data["listen"] = str(config.get("dns_listen", "0.0.0.0:53"))
     _write_routes(config, route_data)
