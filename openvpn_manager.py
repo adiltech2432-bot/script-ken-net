@@ -186,7 +186,7 @@ def _issue_client(username: str) -> tuple[str, Path]:
     return cn, profiles
 
 
-def add_account(username: str, days: int = 30, *, trial: bool = False) -> dict:
+def add_account(username: str, days: int = 30, *, trial: bool = False, trial_minutes: int | None = None) -> dict:
     if not services_manager.NAME_RE.fullmatch(username) or not 1 <= int(days) <= 3650:
         raise ValueError("Invalid OpenVPN username or validity period")
     data = _account_state()
@@ -194,7 +194,7 @@ def add_account(username: str, days: int = 30, *, trial: bool = False) -> dict:
         raise ValueError("Username already exists")
     cn, profile_dir = _issue_client(username)
     data.setdefault("accounts", {})[username] = {"protocol": "openvpn", "cert_cn": cn,
-        "profile_dir": str(profile_dir), "expires_at": (dt.date.today() + dt.timedelta(days=int(days))).isoformat(), "trial": trial}
+        "profile_dir": str(profile_dir), "expires_at": services_manager.expiry_timestamp(days, trial_minutes=trial_minutes if trial else None), "trial": trial}
     services_manager._atomic(STATE, json.dumps(data, indent=2) + "\n")
     services_manager.install_expiry_timer()
     return data["accounts"][username]
@@ -240,7 +240,7 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         if record.get("protocol") != "openvpn":
             continue
         try:
-            if dt.date.fromisoformat(record["expires_at"]) >= today:
+            if not services_manager.expiry_reached(record["expires_at"]):
                 continue
         except (KeyError, ValueError):
             continue
@@ -284,8 +284,9 @@ def menu() -> None:
             elif choice in {"2", "6"}:
                 trial = choice == "6"
                 name = "trial" + secrets.token_hex(3) if trial else input("Username: ").strip()
+                trial_minutes = services_manager.prompt_trial_minutes() if trial else None
                 days = 1 if trial else int(input("Validity days [30]: ").strip() or "30")
-                record = add_account(name, days, trial=trial)
+                record = add_account(name, days, trial=trial, trial_minutes=trial_minutes)
                 terminal_ui.detail_card("OPENVPN ACCOUNT", [
                     ("Remarks", name), ("Host server", services_manager.state().get("domain") or "Set a domain"),
                     ("Access ports", "1194/TCP, 2200/UDP"), ("Transport", "OpenVPN TLS"),

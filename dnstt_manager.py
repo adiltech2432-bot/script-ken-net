@@ -215,7 +215,7 @@ def _next_port(routes: dict) -> int:
     return next((port for port in range(5301, 65000) if port not in used), 0)
 
 
-def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial: bool = False) -> tuple[Path, str]:
+def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial: bool = False, trial_minutes: int | None = None) -> tuple[Path, str]:
     if not NAME_RE.fullmatch(username):
         raise ValueError("Username must contain 3-32 letters, digits, or underscores")
     if not 1 <= int(local_port) <= 65535:
@@ -276,7 +276,7 @@ def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial:
         accounts[username] = {"domain": domain, "port": port, "service": service_name,
                               "service_user": service_user,
                               "key_dir": str(account_dir), "local_port": int(local_port),
-                              "expires_at": (date.today() + timedelta(days=int(days))).isoformat(),
+                              "expires_at": __import__("services_manager").expiry_timestamp(days, trial_minutes=trial_minutes if trial else None),
                               "trial": trial}
         _atomic(ACCOUNTS, json.dumps(accounts, indent=2) + "\n")
     except Exception:
@@ -344,7 +344,7 @@ def purge_expired(today: date | None = None) -> list[str]:
     today = today or date.today()
     accounts = list_accounts()
     expired = [name for name, record in accounts.items()
-               if record.get("expires_at") and date.fromisoformat(record["expires_at"]) < today]
+               if record.get("expires_at") and __import__("services_manager").expiry_reached(record["expires_at"]) ]
     for name in expired:
         remove_account(name)
     return expired
@@ -411,13 +411,14 @@ def menu() -> None:
             elif choice in {"4", "7"}:
                 trial = choice == "7"
                 username = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                trial_minutes = __import__("services_manager").prompt_trial_minutes() if trial else None
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 try:
                     port = int(input("Local client port [7000]: ").strip() or "7000")
                 except ValueError:
                     print("Invalid port")
                     continue
-                profile, records = add_account(username, port, days, trial=trial)
+                profile, records = add_account(username, port, days, trial=trial, trial_minutes=trial_minutes)
                 account = account_details(username)
                 client_text = profile.read_text(encoding="utf-8")
                 pubkey = next((line.partition(":")[2].strip() for line in client_text.splitlines() if line.startswith("Server public key:")), "")

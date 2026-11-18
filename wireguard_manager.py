@@ -221,7 +221,7 @@ def _interface_config(interface: str) -> Path:
 
 
 def add_peer(interface: str, username: str, endpoint: str, dns: str = "1.1.1.1",
-             allowed_ips: str = "0.0.0.0/0, ::/0", days: int = 30, *, trial: bool = False) -> Path:
+             allowed_ips: str = "0.0.0.0/0, ::/0", days: int = 30, *, trial: bool = False, trial_minutes: int | None = None) -> Path:
     if not NAME_RE.fullmatch(username):
         raise ValueError("Username must contain 3-32 letters, digits, or underscores")
     if not 1 <= int(days) <= 3650:
@@ -263,7 +263,7 @@ def add_peer(interface: str, username: str, endpoint: str, dns: str = "1.1.1.1",
             "address": client_address,
             "profile": str(profile_path),
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": (date.today() + timedelta(days=int(days))).isoformat(),
+            "expires_at": __import__("services_manager").expiry_timestamp(days, trial_minutes=trial_minutes if trial else None),
             "trial": trial,
         }
         _atomic_text(peer_state, json.dumps(state, indent=2) + "\n")
@@ -313,7 +313,7 @@ def purge_expired(today: date | None = None) -> list[str]:
     today = today or date.today()
     peers = list_peers()
     expired = [name for name, record in peers.items()
-               if record.get("expires_at") and date.fromisoformat(record["expires_at"]) < today]
+               if record.get("expires_at") and __import__("services_manager").expiry_reached(record["expires_at"]) ]
     for name in expired:
         interface = peers[name].get("interface", "wg0")
         remove_peer(interface, name)
@@ -365,6 +365,7 @@ def menu() -> None:
             elif choice in {"2", "6"}:
                 trial = choice == "6"
                 name = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                trial_minutes = __import__("services_manager").prompt_trial_minutes() if trial else None
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 try:
                     import services_manager
@@ -374,7 +375,7 @@ def menu() -> None:
                 default_endpoint = f"{default_host}:51820" if default_host else ""
                 endpoint = input(f"Server address and port [{default_endpoint}]: ").strip() or default_endpoint
                 dns = input("DNS [1.1.1.1]: ").strip() or "1.1.1.1"
-                path = add_peer(interface, name, endpoint, dns, days=days, trial=trial)
+                path = add_peer(interface, name, endpoint, dns, days=days, trial=trial, trial_minutes=trial_minutes)
                 record = list_peers()[name]
                 terminal_ui.detail_card("WIREGUARD ACCOUNT", [("Name", name), ("Interface", interface),
                     ("Client address", record["address"]), ("Endpoint", endpoint),

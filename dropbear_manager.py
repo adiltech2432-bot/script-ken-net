@@ -56,8 +56,9 @@ def menu() -> None:
             elif choice in {"2", "6"}:
                 trial = choice == "6"
                 username = "trial" + __import__("secrets").token_hex(3) if trial else input("Username: ").strip()
+                trial_minutes = services_manager.prompt_trial_minutes() if trial else None
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
-                password = services_manager.ssh_add(username, days, trial=trial)
+                password = services_manager.ssh_add(username, days, trial=trial, trial_minutes=trial_minutes)
                 services_manager.show_created_account("dropbear", username, password, days, trial=trial)
             elif choice == "3":
                 username=terminal_ui.select_account("DROPBEAR", services_manager.ssh_list())
