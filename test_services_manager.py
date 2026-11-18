@@ -11,6 +11,18 @@ from types import SimpleNamespace
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_trial_expiry_supports_minute_precision_and_range(self):
+        start = services.dt.datetime(2026, 11, 18, 12, 0, 0)
+        with patch.object(services.dt, "datetime") as clock:
+            clock.now.return_value = start
+            clock.timedelta = services.dt.timedelta
+            value = services.expiry_timestamp(trial_minutes=1440)
+        self.assertEqual(value, "2026-11-19T12:00:00")
+        self.assertFalse(services.expiry_reached(value, start))
+        self.assertTrue(services.expiry_reached(value, start + services.dt.timedelta(days=1)))
+        with self.assertRaises(ValueError):
+            services.expiry_timestamp(trial_minutes=1441)
+
     def test_ssh_session_counts_are_per_account_tcp_sessions(self):
         sockets = """ESTAB 0 0 192.0.2.10:22 198.51.100.7:41001 users:((\"sshd\",pid=120,fd=3))
 ESTAB 0 0 192.0.2.10:22 198.51.100.7:41002 users:((\"sshd\",pid=121,fd=3))

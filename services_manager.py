@@ -65,6 +65,39 @@ def state() -> dict:
     return json.loads(STATE.read_text()) if STATE.exists() else {"domain": "", "accounts": {}}
 
 
+def expiry_timestamp(days: int = 0, *, trial_minutes: int | None = None) -> str:
+    if trial_minutes is not None:
+        if not 1 <= int(trial_minutes) <= 1440:
+            raise ValueError("Trial duration must be between 1 and 1440 minutes")
+        return (dt.datetime.now().replace(microsecond=0) + dt.timedelta(minutes=int(trial_minutes))).isoformat(timespec="seconds")
+    return (dt.date.today() + dt.timedelta(days=int(days))).isoformat()
+
+
+def expiry_reached(value: str, now: dt.datetime | None = None) -> bool:
+    try:
+        expiry = dt.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return False
+    current = now or dt.datetime.now(expiry.tzinfo)
+    if expiry.tzinfo is None and current.tzinfo is not None:
+        current = current.replace(tzinfo=None)
+    elif expiry.tzinfo is not None and current.tzinfo is None:
+        current = current.replace(tzinfo=expiry.tzinfo)
+    return expiry <= current
+
+
+def prompt_trial_minutes() -> int:
+    while True:
+        try:
+            minutes = int(input("Trial duration in minutes [1-1440]: ").strip())
+        except ValueError:
+            print("Enter a whole number from 1 to 1440.")
+            continue
+        if 1 <= minutes <= 1440:
+            return minutes
+        print("Trial duration must be between 1 and 1440 minutes.")
+
+
 def _archive_expired(protocol: str, username: str, record: dict) -> None:
     """Keep non-secret expiry metadata so lists can continue to show EXPIRED."""
     try:
@@ -242,7 +275,7 @@ def install_ssh_ip_limit() -> None:
         raise
 
 
-def ssh_add(username: str, days: int, *, trial: bool = False,
+def ssh_add(username: str, days: int, *, trial: bool = False, trial_minutes: int | None = None,
             password: str | None = None, max_ips: int = 0) -> str:
     if not NAME_RE.fullmatch(username) or not 1 <= days <= 3650:
         raise ValueError("Use a 3-32 character username and expiry from 1 to 3650 days")
@@ -255,7 +288,7 @@ def ssh_add(username: str, days: int, *, trial: bool = False,
     if max_ips:
         install_ssh_ip_limit()
     password = password or "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
-    expiry = (dt.date.today() + dt.timedelta(days=days)).isoformat()
+    expiry = expiry_timestamp(days, trial_minutes=trial_minutes if trial else None)
     _run(["useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", expiry, username])
     try:
         _run(["chpasswd"], f"{username}:{password}\n")
@@ -464,7 +497,7 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         if not value:
             continue
         try:
-            is_expired = dt.date.fromisoformat(value) < today
+            is_expired = expiry_reached(value)
         except ValueError:
             continue
         if not is_expired:
@@ -705,7 +738,7 @@ def _write_xray(cfg: dict) -> None:
         raise
 
 
-def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = False) -> str:
+def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = False, trial_minutes: int | None = None) -> str:
     if protocol not in XRAY_PORTS or not NAME_RE.fullmatch(username):
         raise ValueError("Invalid protocol or username")
     if not 1 <= int(days) <= 3650:
@@ -740,7 +773,7 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
             if not any(item.get("email") == username for item in current_clients):
                 current_clients.append(client)
     _write_xray(cfg)
-    expires = (dt.date.today() + dt.timedelta(days=days)).isoformat()
+    expires = expiry_timestamp(days, trial_minutes=trial_minutes if trial else None)
     data["accounts"][username] = {"protocol":protocol,"credential":credential,"port":port,"expires_at":expires,"trial":trial}
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
     install_expiry_timer()
@@ -950,8 +983,8 @@ def show_account_details(protocol: str, username: str) -> None:
 
 def show_created_account(protocol: str, username: str, credential: str, days: int, *, trial: bool = False) -> None:
     import terminal_ui
-    expires = (dt.date.today() + dt.timedelta(days=days)).isoformat()
     current = state()
+    expires = current.get("accounts", {}).get(username, {}).get("expires_at") or expiry_timestamp(days)
     domain = current.get("domain") or "Use the VPS public IP or configured domain"
     if protocol in {"ssh", "dropbear", "udp"}:
         if protocol == "ssh":
@@ -1169,6 +1202,7 @@ def account_menu(protocol: str) -> None:
             elif choice in {"2", "6"}:
                 trial = choice == "6"
                 username = ("trial" + secrets.token_hex(3)) if trial else input("Username: ").strip()
+                trial_minutes = prompt_trial_minutes() if trial else None
                 days = 1 if trial else int(input("Validity in days [30]: ").strip() or "30")
                 if protocol == "ssh":
                     password = _prompt_ssh_password()
@@ -1176,13 +1210,13 @@ def account_menu(protocol: str) -> None:
                         max_ips = int(input("Maximum simultaneous connected IPs [1, 0=unlimited]: ").strip() or "1")
                     except ValueError as exc:
                         raise ValueError("Allowed IP count must be a number") from exc
-                    password = ssh_add(username, days, trial=trial, password=password, max_ips=max_ips)
+                    password = ssh_add(username, days, trial=trial, trial_minutes=trial_minutes, password=password, max_ips=max_ips)
                     show_created_account(protocol, username, password, days, trial=trial)
                 elif protocol == "shadowsocks":
-                    credential = xray_add(protocol, username, days, trial=trial)
+                    credential = xray_add(protocol, username, days, trial=trial, trial_minutes=trial_minutes)
                     show_created_account(protocol, username, credential, days, trial=trial)
                 else:
-                    credential = xray_add(protocol, username, days, trial=trial)
+                    credential = xray_add(protocol, username, days, trial=trial, trial_minutes=trial_minutes)
                     show_created_account(protocol, username, credential, days, trial=trial)
             elif choice == "3":
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)

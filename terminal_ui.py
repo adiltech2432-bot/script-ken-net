@@ -94,7 +94,13 @@ def expiry_status(expires: object) -> str:
     if not expires:
         return "NO EXPIRY"
     try:
-        return "EXPIRED" if date.fromisoformat(str(expires)) < date.today() else "ACTIVE"
+        value = str(expires)
+        try:
+            return "EXPIRED" if date.fromisoformat(value) < date.today() else "ACTIVE"
+        except ValueError:
+            import datetime as dt
+            parsed = dt.datetime.fromisoformat(value)
+            return "EXPIRED" if parsed <= dt.datetime.now(parsed.tzinfo) else "ACTIVE"
     except ValueError:
         return "UNKNOWN"
 
