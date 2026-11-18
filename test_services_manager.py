@@ -23,6 +23,21 @@ class ServiceManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             services.expiry_timestamp(trial_minutes=1441)
 
+    def test_ssh_trial_uses_day_after_exact_expiry_for_linux_account(self):
+        record = {"domain": "", "accounts": {}}
+        with patch.object(services, "expiry_timestamp", return_value="2026-11-18T03:09:48"), \
+             patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=1)), \
+             patch.object(services, "_run") as run, \
+             patch.object(services, "state", return_value=record), \
+             patch.object(services, "_atomic"), \
+             patch.object(services, "install_expiry_timer"):
+            services.ssh_add("trialuser", 1, trial=True, trial_minutes=10, password="correct-horse")
+
+        self.assertEqual(run.call_args_list[0].args[0], [
+            "useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", "2026-11-19", "trialuser"
+        ])
+        self.assertEqual(record["accounts"]["trialuser"]["expires_at"], "2026-11-18T03:09:48")
+
     def test_ssh_session_counts_are_per_account_tcp_sessions(self):
         sockets = """ESTAB 0 0 192.0.2.10:22 198.51.100.7:41001 users:((\"sshd\",pid=120,fd=3))
 ESTAB 0 0 192.0.2.10:22 198.51.100.7:41002 users:((\"sshd\",pid=121,fd=3))

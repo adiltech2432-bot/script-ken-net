@@ -289,7 +289,13 @@ def ssh_add(username: str, days: int, *, trial: bool = False, trial_minutes: int
         install_ssh_ip_limit()
     password = password or "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
     expiry = expiry_timestamp(days, trial_minutes=trial_minutes if trial else None)
-    _run(["useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", expiry, username])
+    # Linux shadow account expiry has day precision, while Kennet trials have
+    # minute precision. Do not let PAM expire a trial at midnight on its
+    # expiry date; the expiry timer enforces the exact timestamp from state.
+    linux_expiry = expiry
+    if trial:
+        linux_expiry = (dt.date.fromisoformat(expiry[:10]) + dt.timedelta(days=1)).isoformat()
+    _run(["useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", linux_expiry, username])
     try:
         _run(["chpasswd"], f"{username}:{password}\n")
     except Exception:
