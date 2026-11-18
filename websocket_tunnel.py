@@ -15,6 +15,7 @@ MAX_FRAME = 16 * 1024 * 1024
 TARGETS = {22, 2109, 1194, 143}
 PATH_TARGETS = {"/": 22, "/ssh-ws": 22, "/dropbear-ws": 2109, "/openvpn-ws": 1194}
 LEGACY_PORTS = {22: 22, 109: 2109, 143: 143, 1194: 1194}
+LEGACY_ACL_BACKEND_PORT = 22
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -78,6 +79,16 @@ async def _copy_raw(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) 
         await writer.drain()
 
 
+async def _relay_raw(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                     backend_reader: asyncio.StreamReader, backend_writer: asyncio.StreamWriter) -> None:
+    tasks = [asyncio.create_task(_copy_raw(reader, backend_writer)),
+             asyncio.create_task(_copy_raw(backend_reader, writer))]
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*done, *pending, return_exceptions=True)
+
+
 async def _ws_to_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     while True:
         _, opcode, payload = await _read_frame(reader)
@@ -104,6 +115,22 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             if ":" in line:
                 name, value = line.split(":", 1)
                 headers[name.strip().lower()] = value.strip()
+
+        # HTTP Custom's legacy "ACL / ... Upgrade: Websocket" payload is a
+        # raw TCP tunnel, not RFC 6455 framing. Keep it restricted to the root
+        # path and the local SSH daemon; all standard WS paths remain framed.
+        if method.upper() == "ACL":
+            if path != "/" or headers.get("upgrade", "").lower() != "websocket":
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+                return
+            backend_reader, backend = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", LEGACY_ACL_BACKEND_PORT), timeout=5)
+            writer.write(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            await writer.drain()
+            await _relay_raw(reader, writer, backend_reader, backend)
+            return
 
         if method.upper() == "CONNECT":
             port = connect_target_port(path)

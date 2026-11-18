@@ -25,26 +25,49 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertTrue(any(call.args[0] == ["systemctl", "start", "xray"] for call in run.mock_calls))
         self.assertIn("-test", subprocess_run.call_args_list[0].args[0])
 
-    def test_vless_link_contains_uuid_tls_domain_and_port(self):
-        link = services.client_link("vless", "alice", "id-value", "vpn.example.com")
-        self.assertTrue(link.startswith("vless://id-value@vpn.example.com:443?"))
+    def test_vless_link_matches_working_legacy_ws_profile(self):
+        link = services.client_link("vless", "alice", "alice", "vpn.example.com")
+        self.assertTrue(link.startswith("vless://alice@vpn.example.com:443?"))
         self.assertIn("security=tls", link)
+        self.assertIn("sni=Google.com", link)
+        self.assertIn("path=%2Fvless", link)
+        self.assertIn("allowInsecure=1", link)
 
     def test_trojan_link_contains_password_and_tls(self):
-        link = services.client_link("trojan", "alice", "secret", "vpn.example.com")
-        self.assertTrue(link.startswith("trojan://secret@vpn.example.com:443?"))
+        link = services.client_link("trojan", "alice", "alice", "vpn.example.com")
+        self.assertTrue(link.startswith("trojan://alice@vpn.example.com:443?"))
         self.assertIn("security=tls", link)
         self.assertIn("type=ws", link)
+        self.assertIn("sni=Google.com", link)
+        self.assertIn("path=%2Fwhatever%2Ftrojan-ws", link)
+        self.assertIn("allowInsecure=1", link)
 
     def test_vmess_link_is_parseable_client_json(self):
-        link = services.client_link("vmess", "alice", "uuid-value", "vpn.example.com")
+        link = services.client_link("vmess", "alice", "alice", "vpn.example.com")
         data = json.loads(base64.b64decode(link.removeprefix("vmess://")))
         self.assertEqual(data["add"], "vpn.example.com")
         self.assertEqual(data["port"], "443")
-        self.assertEqual(data["id"], "uuid-value")
+        self.assertEqual(data["id"], "alice")
         self.assertEqual(data["tls"], "tls")
         self.assertEqual(data["net"], "ws")
         self.assertEqual(data["path"], "/vmess")
+        self.assertEqual(data["sni"], "Google.com")
+        self.assertTrue(data["allowInsecure"])
+
+    def test_custom_xray_client_ids_match_account_names(self):
+        self.assertEqual(services._xray_client("vless", "alice", "alice")["id"], "alice")
+        self.assertEqual(services._xray_client("vmess", "alice", "alice")["id"], "alice")
+        self.assertEqual(services._xray_client("trojan", "alice", "alice")["password"], "alice")
+
+    def test_trojan_path_change_refreshes_existing_manager_inbound(self):
+        config = {"inbounds": [{
+            "tag": "kennet-trojan-ws", "protocol": "trojan", "listen": "127.0.0.1",
+            "port": 10003, "settings": {"clients": [{"password": "alice", "email": "alice"}]},
+            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/trojan-ws"}},
+        }]}
+        self.assertTrue(services._refresh_managed_transports(config))
+        self.assertEqual(config["inbounds"][0]["streamSettings"]["wsSettings"]["path"], "/whatever/trojan-ws")
+        self.assertEqual(config["inbounds"][0]["settings"]["clients"][0]["password"], "alice")
 
     def test_xray_protocols_share_the_public_tls_port_and_use_distinct_local_backends(self):
         self.assertEqual(set(services.XRAY_PORTS.values()), {443})

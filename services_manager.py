@@ -16,8 +16,8 @@ import string
 import subprocess
 import socket
 import tempfile
-import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 STATE = Path("/etc/kennet-panel/services.json")
 XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
@@ -27,8 +27,14 @@ XRAY_PORTS = {"vless": 443, "vmess": 443, "trojan": 443, "shadowsocks": 443}
 XRAY_LAYOUT = {
     "vless": ((10001, "ws", "/vless"), (10005, "grpc", "vless-grpc")),
     "vmess": ((10002, "ws", "/vmess"), (10006, "grpc", "vmess-grpc")),
-    "trojan": ((10003, "ws", "/trojan-ws"), (10007, "grpc", "trojan-grpc")),
+    "trojan": ((10003, "ws", "/whatever/trojan-ws"), (10007, "grpc", "trojan-grpc")),
     "shadowsocks": ((10004, "ws", "/ss-ws"), (10008, "grpc", "ss-grpc")),
+}
+XRAY_WS_PROFILE = {
+    "vless": {"path": "/vless", "sni": "Google.com"},
+    "vmess": {"path": "/vmess", "sni": "Google.com"},
+    "trojan": {"path": "/whatever/trojan-ws", "sni": "Google.com"},
+    "shadowsocks": {"path": "/ss-ws", "sni": "domain"},
 }
 
 
@@ -325,7 +331,7 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("Port Dropbear", "109, 143/TCP" if dropbear else "Not installed"),
         ("Port Dropbear WS", "443, 109/TCP" if dropbear and gateway_ready and websocket_ready else "Not configured"),
         ("Port SSH WS SSL", "443/TCP" if gateway_ready and websocket_ready else "Not configured"),
-        ("Port SSH WS", "80/TCP" if gateway_ready and websocket_ready else "Not configured"),
+        ("Port SSH WS / HTTP Custom proxy", "80, 8080/TCP" if gateway_ready and websocket_ready else "Not configured"),
         ("Port SSL/TLS", "443/TCP" if gateway_ready else "Not configured"),
         ("Port OpenVPN WS SSL", "443/TCP" if ovpn_tcp and gateway_ready and websocket_ready else "Not configured"),
         ("Port OpenVPN SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
@@ -481,14 +487,17 @@ def xray_renew(protocol: str, username: str, days: int) -> None:
     record = account_details(protocol, username)
     record["expires_at"] = (dt.date.today() + dt.timedelta(days=days)).isoformat()
     record["trial"] = False
-    if protocol == "trojan" and record.get("credential") != username:
-        # Apply the requested username-as-password convention on renewal too.
+    if protocol in {"vless", "vmess", "trojan"} and record.get("credential") != username:
+        # Apply the legacy account-name credential convention on renewal too.
         cfg = get_xray_config()
         for inbound in cfg.get("inbounds", []):
             if inbound.get("tag") in _managed_tags(protocol):
                 for client in inbound.get("settings", {}).get("clients", []):
                     if client.get("email") == username:
-                        client["password"] = username
+                        if protocol in {"vless", "vmess"}:
+                            client["id"] = username
+                        else:
+                            client["password"] = username
         _write_xray(cfg)
         record["credential"] = username
     data = state(); data["accounts"][username] = {k:v for k,v in record.items() if k != "username"}
@@ -510,20 +519,23 @@ def xray_install() -> None:
     original = XRAY_CONFIG.read_text(encoding="utf-8")
     config = json.loads(original)
     migrated = _migrate_legacy_xray_inbounds(config)
-    if migrated:
+    transport_updated = _refresh_managed_transports(config)
+    if migrated or transport_updated:
         _atomic(XRAY_CONFIG, json.dumps(config, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
     if check.returncode:
-        if migrated:
+        if migrated or transport_updated:
             _atomic(XRAY_CONFIG, original, 0o644)
         raise RuntimeError((check.stderr or check.stdout or "Xray configuration validation failed").strip())
     _run(["systemctl", "enable", "xray"])
-    _run(["systemctl", "restart" if migrated else "start", "xray"])
+    _run(["systemctl", "restart" if migrated or transport_updated else "start", "xray"])
     active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True, check=False)
     if active.returncode:
         raise RuntimeError("Xray was installed, but xray.service did not become active; inspect: journalctl -u xray -n 80 --no-pager")
     if migrated:
         print("Migrated legacy TLS accounts to the shared WebSocket/gRPC inbounds: " + ", ".join(migrated))
+    if transport_updated:
+        print("Updated managed WebSocket/gRPC transport paths to match the current client profiles.")
     print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
 
 
@@ -553,6 +565,8 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
         raise ValueError("Invalid protocol or username")
     if not 1 <= int(days) <= 3650:
         raise ValueError("Validity must be between 1 and 3650 days")
+    if protocol in {"vless", "vmess"} and len(username.encode("utf-8")) >= 30:
+        raise ValueError("VLESS/VMess account names used as client IDs must be shorter than 30 bytes")
     data = state(); domain = data.get("domain", "")
     if not DOMAIN_RE.fullmatch(domain):
         raise ValueError("Configure the TLS domain before creating Xray accounts")
@@ -566,10 +580,10 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
     gateway_ready, gateway_detail = gateway_manager.is_ready()
     if not gateway_ready:
         raise RuntimeError("Shared HAProxy/Nginx gateway is not ready: " + gateway_detail + ". Use TLS/Domain > Request / renew certificate first")
-    # VLESS and VMess require UUID client IDs; they do not have a password field.
-    # Trojan accepts a password, so use the account name as requested.
-    credential = (str(uuid.uuid4()) if protocol in {"vless", "vmess"}
-                  else username if protocol == "trojan" else secrets.token_urlsafe(24))
+    # Xray supports custom string IDs for VLESS/VMess and maps them to UUIDv5.
+    # This matches the working legacy profiles, which use the account name.
+    credential = (username if protocol in {"vless", "vmess", "trojan"}
+                  else secrets.token_urlsafe(24))
     client = _xray_client(protocol, username, credential)
     cfg.setdefault("inbounds", [])
     for inbound in _managed_protocol_inbounds(protocol, [client]):
@@ -682,17 +696,36 @@ def _managed_protocol_inbounds(protocol: str, clients: list[dict]) -> list[dict]
     return inbounds
 
 
+def _refresh_managed_transports(config: dict) -> bool:
+    """Refresh transport settings on existing manager-owned Xray inbounds."""
+    changed = False
+    for protocol in XRAY_LAYOUT:
+        for expected in _managed_protocol_inbounds(protocol, []):
+            current = next((item for item in config.get("inbounds", [])
+                            if item.get("tag") == expected["tag"]), None)
+            if current is None:
+                continue
+            for key in ("listen", "port", "streamSettings"):
+                if current.get(key) != expected[key]:
+                    current[key] = expected[key]
+                    changed = True
+    return changed
+
+
 def client_link(protocol: str, username: str, credential: str, domain: str) -> str:
     port = XRAY_PORTS[protocol]
     label = username.replace(" ", "_")
+    profile = XRAY_WS_PROFILE[protocol]
+    sni = domain if profile["sni"] == "domain" else profile["sni"]
+    encoded_path = quote(profile["path"], safe="")
     if protocol == "vless":
-        return f"vless://{credential}@{domain}:{port}?encryption=none&security=tls&sni={domain}&type=ws&host={domain}&path=%2Fvless#{label}"
+        return f"vless://{quote(credential, safe='')}@{domain}:{port}?encryption=none&security=tls&sni={sni}&type=ws&host={domain}&path={encoded_path}&allowInsecure=1#{label}"
     if protocol == "trojan":
-        return f"trojan://{credential}@{domain}:{port}?security=tls&sni={domain}&type=ws&host={domain}&path=%2Ftrojan-ws#{label}"
+        return f"trojan://{quote(credential, safe='')}@{domain}:{port}?security=tls&sni={sni}&type=ws&host={domain}&path={encoded_path}&allowInsecure=1#{label}"
     if protocol == "shadowsocks":
         userinfo = base64.urlsafe_b64encode(f"chacha20-ietf-poly1305:{credential}".encode()).decode().rstrip("=")
         return f"ss://{userinfo}@{domain}:{port}/?plugin=v2ray-plugin%3Btls%3Bhost%3D{domain}%3Bpath%3D%2Fss-ws#{label}"
-    raw = json.dumps({"v":"2","ps":label,"add":domain,"port":str(port),"id":credential,"aid":"0","scy":"auto","net":"ws","type":"none","host":domain,"path":"/vmess","tls":"tls","sni":domain}, separators=(",", ":")).encode()
+    raw = json.dumps({"v":"2","ps":label,"add":domain,"port":str(port),"id":credential,"aid":"0","scy":"auto","net":"ws","type":"none","host":domain,"path":profile["path"],"tls":"tls","sni":sni,"allowInsecure":True}, separators=(",", ":")).encode()
     return "vmess://" + base64.b64encode(raw).decode()
 
 
@@ -718,19 +751,22 @@ def grpc_client_link(protocol: str, username: str, credential: str, domain: str)
 def xray_account_fields(protocol: str, username: str, record: dict, domain: str) -> list[tuple[str, object]]:
     """Protocol-aware shared detail layout used after creation and from Show details."""
     credential = str(record.get("credential", ""))
-    ws_path = {"vless": "/vless", "vmess": "/vmess", "trojan": "/trojan-ws", "shadowsocks": "/ss-ws"}[protocol]
+    ws_profile = XRAY_WS_PROFILE[protocol]
+    ws_path = ws_profile["path"]
+    ws_sni = domain if ws_profile["sni"] == "domain" else ws_profile["sni"]
     grpc_service = {"vless": "vless-grpc", "vmess": "vmess-grpc",
                     "trojan": "trojan-grpc", "shadowsocks": "ss-grpc"}[protocol]
-    credential_label = "Password" if protocol in {"trojan", "shadowsocks"} else "Client UUID"
+    credential_label = "Password" if protocol in {"trojan", "shadowsocks"} else "Client ID"
     return [
         ("Remarks", username),
         ("Host server", domain),
-        ("Server name (SNI)", domain),
+        ("Server name (SNI)", ws_sni),
         ("Port TLS", "443/TCP"),
         ("Protocol", protocol.upper()),
         ("Transport", "WebSocket / gRPC"),
         ("Security", "TLS"),
         ("WS path", ws_path),
+        ("Allow insecure TLS", "Yes (legacy profile compatibility)"),
         ("gRPC service", grpc_service),
         (credential_label, credential),
         ("Link WS", client_link(protocol, username, credential, domain)),
@@ -896,7 +932,15 @@ def acquire_tls_certificate(domain: str) -> None:
         challenge = ["--standalone"]
     _run(["certbot", "certonly", *challenge, "--non-interactive", "--agree-tos",
           "--register-unsafely-without-email", "--preferred-challenges", "http", "-d", domain])
-    hook = "#!/bin/sh\nset -eu\nnginx -t\nsystemctl reload nginx.service\n"
+    haproxy_cert = f"/etc/haproxy/certs/{domain}.pem"
+    hook = ("#!/bin/sh\nset -eu\n"
+            f"install -d -m 0750 /etc/haproxy/certs\n"
+            f"cat /etc/letsencrypt/live/{domain}/fullchain.pem /etc/letsencrypt/live/{domain}/privkey.pem > {haproxy_cert}\n"
+            f"chmod 0600 {haproxy_cert}\n"
+            "haproxy -c -f /etc/haproxy/haproxy.cfg\n"
+            "nginx -t\n"
+            "systemctl reload haproxy.service\n"
+            "systemctl reload nginx.service\n")
     _atomic(Path("/etc/letsencrypt/renewal-hooks/deploy/kennet-gateway-tls.sh"), hook, 0o755)
     print(f"TLS certificate installed for {domain}. DNS addresses: {', '.join(addresses)}. TCP/80 must remain reachable for renewal.")
 

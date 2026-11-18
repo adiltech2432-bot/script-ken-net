@@ -20,12 +20,36 @@ HAPROXY_BEGIN = "# BEGIN KEN-NET MANAGED FRONTENDS"
 HAPROXY_END = "# END KEN-NET MANAGED FRONTENDS"
 
 
-def render_haproxy() -> str:
-    """Route raw OpenVPN/SSH handshakes and TLS to Nginx without terminating TLS."""
-    return """# Managed by Ken-net. HAProxy is the only public owner of TCP/80 and TCP/443.
+def render_haproxy(tls_cert: str | None = None) -> str:
+    """Multiplex raw OpenVPN/SSH, legacy TLS-wrapped SSH, and HTTP/TLS services."""
+    tls_termination = ""
+    tls_backend = "    use_backend kennet_tls_termination if tls_client_hello\n    default_backend kennet_tls_termination"
+    if tls_cert:
+        tls_termination = f"""
+frontend kennet_tls_terminated
+    mode tcp
+    bind 127.0.0.1:8444 ssl crt {tls_cert} alpn h2,http/1.1
+    tcp-request inspect-delay 2s
+    acl ssh_banner payload(0,7) -m str SSH-2.0
+    acl http_request req.proto_http
+    acl http2_preface payload(0,14) -m str "PRI * HTTP/2.0"
+    tcp-request content accept if ssh_banner or http_request or http2_preface
+    use_backend kennet_ssh_raw if ssh_banner
+    use_backend kennet_nginx_http if http_request or http2_preface
+    default_backend kennet_ssh_raw
+"""
+        tls_backend = "    use_backend kennet_tls_termination if tls_client_hello\n    default_backend kennet_tls_termination"
+    else:
+        tls_backend = "    use_backend kennet_nginx_tls if tls_client_hello\n    default_backend kennet_nginx_tls"
+    return f"""# Managed by Ken-net. HAProxy is the public owner of shared tunnel ports.
 frontend kennet_http
     mode tcp
     bind :80
+    default_backend kennet_nginx_http
+
+frontend kennet_http_custom_proxy
+    mode tcp
+    bind :8080
     default_backend kennet_nginx_http
 
 frontend kennet_dropbear_mux
@@ -49,12 +73,11 @@ frontend kennet_tls_mux
     tcp-request content accept if tls_client_hello or ovpn_v2 or ovpn_v1 or ssh_banner
     use_backend kennet_openvpn_tcp if ovpn_v2 or ovpn_v1
     use_backend kennet_ssh_raw if ssh_banner
-    use_backend kennet_nginx_tls if tls_client_hello
-    default_backend kennet_nginx_tls
+{tls_backend}
 
 backend kennet_nginx_http
     mode tcp
-    server nginx_http 127.0.0.1:8080 check
+    server nginx_http 127.0.0.1:8081 check
 
 backend kennet_nginx_tls
     mode tcp
@@ -71,6 +94,7 @@ backend kennet_ssh_raw
 backend kennet_dropbear
     mode tcp
     server dropbear 127.0.0.1:2109 check
+{tls_termination.rstrip()}
 """
 
 
@@ -102,26 +126,37 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
     if not services_manager.DOMAIN_RE.fullmatch(domain):
         raise ValueError("Configure a valid domain and TLS certificate first")
     cert = f"/etc/letsencrypt/live/{domain}"
+    # The old published Trojan profile uses /whatever/trojan-ws. Keep the
+    # previous /trojan-ws URL as an alias and normalize both for Xray.
     ws_locations = {
-        "/ssh-ws": 10015,
-        "/dropbear-ws": 10015,
-        "/openvpn-ws": 10015,
-        "/vless": 10001,
-        "/vmess": 10002,
-        "/trojan-ws": 10003,
-        "/ss-ws": 10004,
+        "/ssh-ws": (10015, "/ssh-ws"),
+        "/dropbear-ws": (10015, "/dropbear-ws"),
+        "/openvpn-ws": (10015, "/openvpn-ws"),
+        "/vless": (10001, "/vless"),
+        "/vmess": (10002, "/vmess"),
+        "/trojan-ws": (10003, "/whatever/trojan-ws"),
+        "/whatever/trojan-ws": (10003, "/whatever/trojan-ws"),
+        "/ss-ws": (10004, "/ss-ws"),
     }
     ws = "\n".join(
         f"    location = {path} {{\n"
-        "        proxy_pass http://127.0.0.1:" + str(port) + ";\n"
+        "        proxy_pass http://127.0.0.1:" + str(port) + upstream_path + ";\n"
         "        proxy_http_version 1.1;\n"
         "        proxy_set_header Upgrade $http_upgrade;\n"
         "        proxy_set_header Connection \"upgrade\";\n"
         "        proxy_set_header X-Real-Host $http_x_real_host;\n"
         "        proxy_read_timeout 1h;\n"
         "    }"
-        for path, port in ws_locations.items()
+        for path, (port, upstream_path) in ws_locations.items()
     )
+    legacy_root = """    location = / {
+        proxy_pass http://127.0.0.1:10015;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 1h;
+    }
+"""
     grpc_locations = "\n".join(
         f"    location ^~ /{name}-grpc/ {{\n"
         f"        grpc_pass grpc://127.0.0.1:{port};\n"
@@ -141,9 +176,10 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
 """ if include_tls else ""
     return f"""# Managed by Ken-net.
 server {{
-    listen 127.0.0.1:8080 http2;
+    listen 127.0.0.1:8081 http2;
     server_name {domain};
     location ^~ /.well-known/acme-challenge/ {{ root /var/www/letsencrypt; }}
+{legacy_root}
 {ws}
 {grpc_locations}
     location / {{ return 404; }}
@@ -233,7 +269,13 @@ def install() -> None:
         NGINX_LINK.unlink()
     NGINX_LINK.symlink_to(NGINX_SITE)
     HAPROXY_CFG.parent.mkdir(parents=True, exist_ok=True)
-    managed_config = render_haproxy()
+    cert_available = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").is_file() and Path(f"/etc/letsencrypt/live/{domain}/privkey.pem").is_file()
+    haproxy_cert = Path(f"/etc/haproxy/certs/{domain}.pem")
+    if cert_available:
+        haproxy_cert.parent.mkdir(parents=True, exist_ok=True)
+        _atomic(haproxy_cert, Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").read_text(encoding="utf-8") +
+                Path(f"/etc/letsencrypt/live/{domain}/privkey.pem").read_text(encoding="utf-8"), 0o600)
+    managed_config = render_haproxy(str(haproxy_cert) if cert_available else None)
     _atomic(HAPROXY_CFG, managed_config)
     config = Path("/etc/haproxy/haproxy.cfg")
     current = config.read_text(encoding="utf-8") if config.exists() else ""
@@ -251,7 +293,7 @@ def install() -> None:
     install_websocket_service()
     _run(["systemctl", "enable", "nginx.service", "haproxy.service"])
     _run(["systemctl", "restart", "nginx.service", "haproxy.service"])
-    services_manager.open_ports([("tcp", 80), ("tcp", 81), ("tcp", 443)])
+    services_manager.open_ports([("tcp", 80), ("tcp", 81), ("tcp", 443), ("tcp", 8080)])
 
 
 def is_ready() -> tuple[bool, str]:
@@ -263,7 +305,13 @@ def is_ready() -> tuple[bool, str]:
     """
     missing = [unit for unit in ("haproxy", "nginx")
                if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode]
-    ports = {80, 443, 8080, 8443}
+    ports = {80, 443, 8080, 8081, 8443}
+    try:
+        domain = services_manager.state().get("domain", "")
+        if domain and Path(f"/etc/haproxy/certs/{domain}.pem").is_file():
+            ports.add(8444)
+    except (OSError, ValueError):
+        pass
     if missing:
         return False, "Inactive gateway services: " + ", ".join(missing)
     listeners = subprocess.run(["ss", "-Hlnt"], text=True, capture_output=True, check=False).stdout
