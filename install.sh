@@ -26,6 +26,17 @@ install -d -o root -g root -m 0755 "${DEST_DIR}"
 for file in "${REQUIRED[@]}"; do
   install -o root -g root -m 0644 "${SOURCE_DIR}/${file}" "${DEST_DIR}/${file}"
 done
+
+# The public gateway runs a separate copy of the WebSocket bridge. Keep that
+# runtime copy in sync during upgrades; updating /opt alone leaves the old
+# daemon running (which rejects the legacy HTTP Custom ACL handshake).
+if command -v systemctl >/dev/null 2>&1 && systemctl cat kennet-websocket.service >/dev/null 2>&1; then
+  install -d -o root -g root -m 0755 /usr/local/lib/kennet-panel
+  install -o root -g root -m 0755 "${SOURCE_DIR}/websocket_tunnel.py" \
+    /usr/local/lib/kennet-panel/websocket_tunnel.py
+  systemctl restart kennet-websocket.service
+fi
+
 install -o root -g root -m 0644 "${SOURCE_DIR}/README.md" "${DEST_DIR}/README.md"
 install -o root -g root -m 0644 "${SOURCE_DIR}/test_panel.py" "${DEST_DIR}/test_panel.py"
 install -o root -g root -m 0644 "${SOURCE_DIR}/test_protocol_additions.py" "${DEST_DIR}/test_protocol_additions.py"
