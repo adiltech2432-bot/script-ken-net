@@ -277,9 +277,6 @@ def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial:
     if not port:
         raise RuntimeError("No DNSTT backend ports are available")
     account_dir = ACCOUNT_DIR / username
-    account_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    keyfile = account_dir / "server.key"
-    pubfile = account_dir / "server.pub"
     service_name = f"kennet-dnstt-{username}.service"
     service_user = f"kennet-dnstt-{username}"
     unit_path = SYSTEMD / service_name
@@ -288,6 +285,21 @@ def add_account(username: str, local_port: int = 7000, days: int = 30, *, trial:
     if subprocess.run(["systemctl", "is-active", "--quiet", MUX_UNIT],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
         raise RuntimeError("DNSTT router must be active before adding accounts")
+    if account_dir.exists():
+        if account_dir.is_symlink() or not account_dir.is_dir():
+            raise FileExistsError(f"Refusing to replace a non-directory DNSTT path: {account_dir}")
+        service_active = subprocess.run(["systemctl", "is-active", "--quiet", service_name],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        user_exists = subprocess.run(["id", "-u", service_user], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, check=False).returncode == 0
+        if service_active or user_exists:
+            raise FileExistsError(f"Orphan DNSTT data has an active service or system user; inspect before reusing {username}")
+        # A previous interrupted create left data, but there is no account
+        # record, route, unit, active process, or service user for this name.
+        shutil.rmtree(account_dir)
+    account_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    keyfile = account_dir / "server.key"
+    pubfile = account_dir / "server.pub"
     user_created = False
     try:
         _run(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
