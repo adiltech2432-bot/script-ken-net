@@ -36,7 +36,10 @@ class PanelTests(unittest.TestCase):
 
     def test_dnstt_is_not_reported_as_ready_without_detected_services(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "dnstt")
-        state, _ = panel.protocol_state(p)
+        with patch.object(panel, "systemd_active", return_value=False), patch.object(
+            panel.Path, "is_file", return_value=False
+        ):
+            state, _ = panel.protocol_state(p)
         self.assertEqual(state, "Not ready")
 
     def test_udp_custom_is_not_reported_ready_without_installed_binary(self):
@@ -57,7 +60,10 @@ class PanelTests(unittest.TestCase):
 
     def test_slowdns_explains_its_dnstd_manager_setup(self):
         p = next(x for x in panel.PROTOCOLS if x.key == "slowdns")
-        state, detail = panel.protocol_state(p)
+        with patch.object(panel, "systemd_active", return_value=False), patch.object(
+            panel.Path, "is_file", return_value=False
+        ):
+            state, detail = panel.protocol_state(p)
         self.assertEqual(state, "Not ready")
         self.assertIn("DNSTT manager in option 11", detail)
 
