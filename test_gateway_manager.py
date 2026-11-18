@@ -27,6 +27,9 @@ class GatewayRenderingTests(unittest.TestCase):
         config = gateway_manager.render_haproxy()
         self.assertIn("bind :80", config)
         self.assertIn("bind :8080", config)
+        self.assertIn('acl legacy_acl req.payload(0,4) -m str "ACL "', config)
+        self.assertIn("use_backend kennet_ws_bridge if legacy_acl", config)
+        self.assertIn("server websocket_bridge 127.0.0.1:10015 check", config)
         self.assertIn("bind :443", config)
         self.assertLess(config.index("use_backend kennet_openvpn_tcp"), config.index("use_backend kennet_nginx_tls"))
         self.assertIn("127.0.0.1:1194", config)
@@ -36,6 +39,7 @@ class GatewayRenderingTests(unittest.TestCase):
         self.assertIn("bind 127.0.0.1:8444 ssl crt /etc/haproxy/certs/vpn.example.org.pem", config)
         self.assertIn("use_backend kennet_ssh_raw if ssh_banner", config)
         self.assertIn("use_backend kennet_nginx_http if http_request or http2_preface", config)
+        self.assertIn("backend kennet_tls_termination", config)
         self.assertIn("server nginx_http 127.0.0.1:8081 check", config)
 
     def test_nginx_routes_xray_websocket_grpc_and_tunnel_bridge(self):

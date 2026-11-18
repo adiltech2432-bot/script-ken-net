@@ -36,7 +36,11 @@ frontend kennet_tls_terminated
     tcp-request content accept if ssh_banner or http_request or http2_preface
     use_backend kennet_ssh_raw if ssh_banner
     use_backend kennet_nginx_http if http_request or http2_preface
-    default_backend kennet_ssh_raw
+    default_backend kennet_nginx_http
+
+backend kennet_tls_termination
+    mode tcp
+    server tls_termination 127.0.0.1:8444 check
 """
         tls_backend = "    use_backend kennet_tls_termination if tls_client_hello\n    default_backend kennet_tls_termination"
     else:
@@ -45,11 +49,21 @@ frontend kennet_tls_terminated
 frontend kennet_http
     mode tcp
     bind :80
+    tcp-request inspect-delay 2s
+    acl legacy_acl req.payload(0,4) -m str "ACL "
+    acl http_request req.proto_http
+    tcp-request content accept if legacy_acl or http_request
+    use_backend kennet_ws_bridge if legacy_acl
     default_backend kennet_nginx_http
 
 frontend kennet_http_custom_proxy
     mode tcp
     bind :8080
+    tcp-request inspect-delay 2s
+    acl legacy_acl req.payload(0,4) -m str "ACL "
+    acl http_request req.proto_http
+    tcp-request content accept if legacy_acl or http_request
+    use_backend kennet_ws_bridge if legacy_acl
     default_backend kennet_nginx_http
 
 frontend kennet_dropbear_mux
@@ -78,6 +92,10 @@ frontend kennet_tls_mux
 backend kennet_nginx_http
     mode tcp
     server nginx_http 127.0.0.1:8081 check
+
+backend kennet_ws_bridge
+    mode tcp
+    server websocket_bridge 127.0.0.1:10015 check
 
 backend kennet_nginx_tls
     mode tcp
