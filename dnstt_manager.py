@@ -156,12 +156,35 @@ def _write_routes(config: dict, routes: dict) -> None:
     _atomic(ETC / "dnstt-router.json", json.dumps(routes, indent=2) + "\n", 0o644)
 
 
+def _effective_dns_listen(config: dict) -> str:
+    """Avoid wildcard UDP/53 conflicts with the systemd-resolved loopback stub."""
+    listen = str(config.get("dns_listen", "0.0.0.0:53"))
+    host, raw_port = listen.rsplit(":", 1)
+    if host not in {"", "0.0.0.0", "::", "[::]"} or int(raw_port) != 53:
+        return listen
+    route = _run(["ip", "-o", "-4", "route", "get", "1.1.1.1"])
+    match = re.search(r"\bsrc\s+([0-9.]+)", route)
+    if not match:
+        raise RuntimeError("Could not determine the VPS interface address for the DNSTT DNS listener")
+    try:
+        address = ipaddress.IPv4Address(match.group(1))
+    except ipaddress.AddressValueError as exc:
+        raise RuntimeError("The detected DNSTT listener address is not a valid IPv4 address") from exc
+    if address.is_unspecified or address.is_loopback or address.is_multicast:
+        raise RuntimeError("The detected DNSTT listener address is not a usable interface address")
+    return f"{address}:{raw_port}"
+
+
 def install_router() -> None:
     """Install the DNS multiplexer service. Does not stop existing DNS services."""
     config = _configuration()
     if subprocess.run(["systemctl", "is-active", "--quiet", "server.service"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0:
         raise RuntimeError("An existing server.service is active; migrate only on a separate test VPS to avoid disrupting it")
+    effective_listen = _effective_dns_listen(config)
+    if effective_listen != config.get("dns_listen"):
+        config["dns_listen"] = effective_listen
+        _atomic(CONFIG, json.dumps(config, indent=2) + "\n")
     source = Path(__file__).resolve().with_name("dnstt_mux.py")
     if not source.is_file():
         raise FileNotFoundError(f"Router source not found beside manager: {source}")
@@ -198,6 +221,7 @@ def install_router() -> None:
         if active:
             _run(["systemctl", "restart", MUX_UNIT])
         else:
+            _run(["systemctl", "reset-failed", MUX_UNIT])
             _run(["systemctl", "enable", "--now", MUX_UNIT])
         try:
             import services_manager
