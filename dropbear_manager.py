@@ -16,14 +16,25 @@ def install() -> None:
     if not shutil.which("dropbear"):
         subprocess.run(["apt-get", "update"], check=True)
         subprocess.run(["apt-get", "install", "-y", "dropbear-bin"], check=True)
+    key_dir = Path("/etc/dropbear")
+    key_dir.mkdir(parents=True, exist_ok=True)
+    host_key = key_dir / "dropbear_ed25519_host_key"
+    if not host_key.is_file():
+        keygen = shutil.which("dropbearkey")
+        if not keygen:
+            raise FileNotFoundError("dropbearkey is missing; install the dropbear-bin package")
+        subprocess.run([keygen, "-t", "ed25519", "-f", str(host_key)], check=True)
+        host_key.chmod(0o600)
     unit = """[Unit]
 Description=Kennet Dropbear SSH service
 After=network.target ssh.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 [Service]
 Type=simple
-ExecStart=/usr/sbin/dropbear -F -E -p 2109 -p 143
+ExecStart=/usr/sbin/dropbear -F -E -r /etc/dropbear/dropbear_ed25519_host_key -p 2109 -p 143
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=full
 [Install]
@@ -34,6 +45,7 @@ WantedBy=multi-user.target
         raise FileExistsError(f"Refusing to overwrite unrelated unit: {path}")
     path.write_text(unit, encoding="utf-8")
     subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "reset-failed", "kennet-dropbear.service"], check=False)
     subprocess.run(["systemctl", "enable", "--now", "kennet-dropbear.service"], check=True)
     services_manager.open_ports([("tcp", 109), ("tcp", 143), ("tcp", 443)])
 
