@@ -16,7 +16,8 @@ class GatewayRenderingTests(unittest.TestCase):
 
         listeners = "".join(f"LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:*\n"
                             for port in (80, 443, 8080, 8081, 8443))
-        with patch.object(gateway_manager.subprocess, "run", side_effect=[
+        with patch.object(gateway_manager.services_manager, "state", return_value={"domain": ""}), \
+             patch.object(gateway_manager.subprocess, "run", side_effect=[
                 SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
                 SimpleNamespace(returncode=0, stdout=listeners)]):
             ready, detail = gateway_manager.is_ready()
