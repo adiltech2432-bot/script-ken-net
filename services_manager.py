@@ -520,15 +520,16 @@ def xray_install() -> None:
     config = json.loads(original)
     migrated = _migrate_legacy_xray_inbounds(config)
     transport_updated = _refresh_managed_transports(config)
-    if migrated or transport_updated:
+    outbound_updated = _ensure_default_xray_outbound(config)
+    if migrated or transport_updated or outbound_updated:
         _atomic(XRAY_CONFIG, json.dumps(config, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
     if check.returncode:
-        if migrated or transport_updated:
+        if migrated or transport_updated or outbound_updated:
             _atomic(XRAY_CONFIG, original, 0o644)
         raise RuntimeError((check.stderr or check.stdout or "Xray configuration validation failed").strip())
     _run(["systemctl", "enable", "xray"])
-    _run(["systemctl", "restart" if migrated or transport_updated else "start", "xray"])
+    _run(["systemctl", "restart" if migrated or transport_updated or outbound_updated else "start", "xray"])
     active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True, check=False)
     if active.returncode:
         raise RuntimeError("Xray was installed, but xray.service did not become active; inspect: journalctl -u xray -n 80 --no-pager")
@@ -536,6 +537,8 @@ def xray_install() -> None:
         print("Migrated legacy TLS accounts to the shared WebSocket/gRPC inbounds: " + ", ".join(migrated))
     if transport_updated:
         print("Updated managed WebSocket/gRPC transport paths to match the current client profiles.")
+    if outbound_updated:
+        print("Repaired the missing Xray freedom outbound; client traffic now has a direct route.")
     print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
 
 
@@ -545,7 +548,31 @@ def get_xray_config() -> dict:
     return json.loads(XRAY_CONFIG.read_text())
 
 
+def _ensure_default_xray_outbound(cfg: dict) -> bool:
+    """Ensure an otherwise empty Xray config can forward accepted client traffic."""
+    outbounds = cfg.get("outbounds")
+    if not isinstance(outbounds, list):
+        outbounds = []
+        cfg["outbounds"] = outbounds
+    if outbounds:
+        return False
+    outbounds.append({"protocol": "freedom", "tag": "direct"})
+    return True
+
+
+def ensure_xray_default_outbound() -> bool:
+    """Repair an installed Xray config with no outbound and restart it safely."""
+    if not XRAY_CONFIG.is_file():
+        return False
+    config = get_xray_config()
+    if not _ensure_default_xray_outbound(config):
+        return False
+    _write_xray(config)
+    return True
+
+
 def _write_xray(cfg: dict) -> None:
+    _ensure_default_xray_outbound(cfg)
     original = XRAY_CONFIG.read_text(encoding="utf-8") if XRAY_CONFIG.exists() else None
     _atomic(XRAY_CONFIG, json.dumps(cfg, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)

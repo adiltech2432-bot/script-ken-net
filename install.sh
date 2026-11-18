@@ -53,6 +53,22 @@ if certificate and (certificate / "fullchain.pem").is_file() and (certificate / 
 PY
 fi
 
+# An Xray daemon can be healthy while forwarding nowhere if its existing
+# configuration has an empty outbounds list. Repair only that empty case and
+# preserve every configured inbound/account and any existing outbound setup.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet xray.service && \
+   [[ -f /usr/local/etc/xray/config.json ]]; then
+  python3 - "${DEST_DIR}" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import services_manager
+
+if services_manager.ensure_xray_default_outbound():
+    print("Repaired Xray: added the missing direct freedom outbound.")
+PY
+fi
+
 install -o root -g root -m 0644 "${SOURCE_DIR}/README.md" "${DEST_DIR}/README.md"
 install -o root -g root -m 0644 "${SOURCE_DIR}/test_panel.py" "${DEST_DIR}/test_panel.py"
 install -o root -g root -m 0644 "${SOURCE_DIR}/test_protocol_additions.py" "${DEST_DIR}/test_protocol_additions.py"

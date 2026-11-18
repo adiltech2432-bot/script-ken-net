@@ -25,6 +25,27 @@ class ServiceManagerTests(unittest.TestCase):
         self.assertTrue(any(call.args[0] == ["systemctl", "start", "xray"] for call in run.mock_calls))
         self.assertIn("-test", subprocess_run.call_args_list[0].args[0])
 
+    def test_xray_installer_repairs_empty_outbounds_and_restarts_service(self):
+        from pathlib import Path
+
+        initial = {"log": {"loglevel": "warning"}, "inbounds": [{"tag": "keep-me"}],
+                   "outbounds": [], "routing": {"rules": []}}
+        with tempfile.TemporaryDirectory() as temp, patch.object(services, "XRAY_CONFIG", Path(temp) / "config.json"), \
+             patch("builtins.input", return_value="YES"), patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
+             patch.object(services, "_run") as run, patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+            services.XRAY_CONFIG.write_text(json.dumps(initial))
+            services.xray_install()
+            saved = json.loads(services.XRAY_CONFIG.read_text())
+
+        self.assertEqual(saved["outbounds"], [{"protocol": "freedom", "tag": "direct"}])
+        self.assertEqual(saved["inbounds"], initial["inbounds"])
+        self.assertIn(["systemctl", "restart", "xray"], [call.args[0] for call in run.mock_calls])
+
+    def test_default_outbound_repair_preserves_existing_custom_outbounds(self):
+        config = {"outbounds": [{"tag": "proxy", "protocol": "socks"}]}
+        self.assertFalse(services._ensure_default_xray_outbound(config))
+        self.assertEqual(config["outbounds"], [{"tag": "proxy", "protocol": "socks"}])
+
     def test_vless_link_matches_working_legacy_ws_profile(self):
         link = services.client_link("vless", "alice", "alice", "vpn.example.com")
         self.assertTrue(link.startswith("vless://alice@vpn.example.com:443?"))
