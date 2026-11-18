@@ -52,7 +52,8 @@ class GatewayRenderingTests(unittest.TestCase):
         self.assertIn("proxy_pass http://127.0.0.1:10003/whatever/trojan-ws", config)
         self.assertIn("location = /trojan-ws", config)
         self.assertIn("listen 127.0.0.1:8443 ssl http2", config)
-        self.assertIn("listen 127.0.0.1:8081 http2", config)
+        self.assertIn("listen 127.0.0.1:8081;", config)
+        self.assertNotIn("listen 127.0.0.1:8081 http2", config)
         self.assertIn("proxy_pass http://127.0.0.1:10015", config)
         self.assertIn("location ^~ /trojan-grpc/", config)
         with self.assertRaises(ValueError):

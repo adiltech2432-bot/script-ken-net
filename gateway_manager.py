@@ -194,7 +194,10 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
 """ if include_tls else ""
     return f"""# Managed by Ken-net.
 server {{
-    listen 127.0.0.1:8081 http2;
+    # HAProxy terminates public TLS and forwards HTTP/1.1 WebSocket requests.
+    # Keep this cleartext backend on HTTP/1.x; enabling h2 here makes Nginx
+    # emit binary HTTP/2 SETTINGS frames to HTTP/1.1 clients.
+    listen 127.0.0.1:8081;
     server_name {domain};
     location ^~ /.well-known/acme-challenge/ {{ root /var/www/letsencrypt; }}
 {legacy_root}

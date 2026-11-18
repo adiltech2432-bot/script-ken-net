@@ -35,6 +35,22 @@ if command -v systemctl >/dev/null 2>&1 && systemctl cat kennet-websocket.servic
   install -o root -g root -m 0755 "${SOURCE_DIR}/websocket_tunnel.py" \
     /usr/local/lib/kennet-panel/websocket_tunnel.py
   systemctl restart kennet-websocket.service
+
+  # Re-render the existing managed gateway so transport fixes reach Nginx and
+  # HAProxy too. Skip clean hosts or installations without a domain certificate.
+  python3 - "${DEST_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import gateway_manager
+import services_manager
+
+domain = services_manager.state().get("domain", "")
+certificate = Path(f"/etc/letsencrypt/live/{domain}") if domain else None
+if certificate and (certificate / "fullchain.pem").is_file() and (certificate / "privkey.pem").is_file():
+    gateway_manager.install()
+PY
 fi
 
 install -o root -g root -m 0644 "${SOURCE_DIR}/README.md" "${DEST_DIR}/README.md"
