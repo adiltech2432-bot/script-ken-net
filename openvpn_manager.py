@@ -43,10 +43,16 @@ def _atomic(path: Path, value: str, mode: int = 0o600) -> None:
         raise
 
 
-def _env(cn: str = "") -> dict:
+def _env(cn: str | None = None) -> dict:
     import os
     env = os.environ.copy()
-    env.update(EASYRSA_PKI=str(PKI), EASYRSA_BATCH="1", EASYRSA_REQ_CN=cn or "Kennet VPN CA")
+    # EasyRSA's *-full commands derive the certificate common name from the
+    # positional name argument and reject EASYRSA_REQ_CN as an external CN.
+    # Only set it for build-ca, where no positional certificate name is used.
+    env.pop("EASYRSA_REQ_CN", None)
+    env.update(EASYRSA_PKI=str(PKI), EASYRSA_BATCH="1")
+    if cn is not None:
+        env["EASYRSA_REQ_CN"] = cn
     return env
 
 
@@ -114,8 +120,8 @@ def install() -> None:
     PKI.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (PKI / "ca.crt").is_file():
         _run([EASYRSA, "init-pki"], env=_env())
-        _run([EASYRSA, "build-ca", "nopass"], env=_env())
-        _run([EASYRSA, "build-server-full", "server", "nopass"], env=_env("server"))
+        _run([EASYRSA, "build-ca", "nopass"], env=_env("Kennet VPN CA"))
+        _run([EASYRSA, "build-server-full", "server", "nopass"], env=_env())
         _run([EASYRSA, "gen-crl"], env=_env())
         _run(["openvpn", "--genkey", "secret", str(ROOT / "tls-crypt.key")])
         os.chmod(ROOT / "tls-crypt.key", 0o600)
@@ -178,7 +184,7 @@ def _profile(domain: str, cn: str, protocol: str, port: int) -> str:
 def _issue_client(username: str) -> tuple[str, Path]:
     domain = services_manager.state().get("domain", "")
     cn = f"{username}-{secrets.token_hex(4)}"
-    _run([EASYRSA, "build-client-full", cn, "nopass"], env=_env(cn))
+    _run([EASYRSA, "build-client-full", cn, "nopass"], env=_env())
     profiles = ACCOUNTS_DIR / username
     profiles.mkdir(parents=True, exist_ok=True, mode=0o700)
     for key, (proto, port) in PROFILES.items():
