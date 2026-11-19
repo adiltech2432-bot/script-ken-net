@@ -322,8 +322,8 @@ def ssh_add(username: str, days: int, *, trial: bool = False, trial_minutes: int
         raise ValueError("Use a 3-32 character username and expiry from 1 to 3650 days")
     if not 0 <= int(max_ips) <= 128:
         raise ValueError("Allowed IP count must be from 0 (unlimited) to 128")
-    if password is not None and (len(password) < 8 or any(char in password for char in "\r\n:")):
-        raise ValueError("Password must be at least 8 characters and contain no line breaks or ':'")
+    if password is not None and (len(password) < 4 or any(char in password for char in "\r\n:")):
+        raise ValueError("Password must be at least 4 characters and contain no line breaks or ':'")
     if subprocess.run(["id", "-u", username], capture_output=True).returncode == 0:
         raise ValueError("Username already exists")
     if max_ips:
@@ -522,16 +522,13 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
 
 
 def _prompt_ssh_password() -> str:
-    print("SSH password rules: at least 8 characters; ':' and line breaks are not allowed.")
+    print("SSH password rules: at least 4 characters; ':' and line breaks are not allowed.")
     while True:
         first = getpass.getpass("Password (input hidden): ")
-        if len(first) < 8 or any(char in first for char in "\r\n:"):
-            print("Invalid password. Use at least 8 characters and avoid ':' or line breaks.")
+        if len(first) < 4 or any(char in first for char in "\r\n:"):
+            print("Invalid password. Use at least 4 characters and avoid ':' or line breaks.")
             continue
-        second = getpass.getpass("Confirm password: ")
-        if first == second:
-            return first
-        print("Passwords do not match. Please try again.")
+        return first
 
 
 def install_expiry_timer() -> None:
