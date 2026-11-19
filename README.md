@@ -43,10 +43,12 @@ The installer runs the local test suite, backs up the previous `panel.py` when i
 ### Dashboard controls
 
 - **Up/Down** or **J/K:** move through protocol cards.
-- **Enter** or **A:** open the selected existing protocol manager.
+- **Enter:** open the selected protocol screen. Its tabs show real account rows, route Create/Trial to the existing manager, and report live service/listener details.
+- **A:** open the selected existing protocol manager directly.
+- On a protocol screen, **Left/Right** or **H/L** changes tabs; **A** shows Accounts, **C** opens Create, **T** opens Trial, **S** shows Service, and **Enter** opens the manager workflow from Create/Trial/Service.
 - **Tab:** move focus to Settings & Tools; **Left/Right** selects a tool.
 - **1–15:** open the original numbered protocol/tool option directly; **0** opens the exit action.
-- **Esc/Backspace:** leave tool focus or clear the current numeric choice; **Q** asks before exiting.
+- **Esc/Backspace:** return from a protocol screen, leave tool focus, or clear the current numeric choice; **Q** asks before exiting from the dashboard.
 - The view refreshes every two seconds and responds to terminal resize. It requires at least 80×24; smaller terminals show a resize prompt. Missing listener/account values display `—` instead of a guessed value.
 
 Run `sudo kennet-panel --plain` for a no-color ASCII dashboard or `sudo kennet-panel --legacy` for the original menu. Non-interactive sessions and `TERM=dumb` automatically use the plain dashboard.

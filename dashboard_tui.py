@@ -303,6 +303,8 @@ class Dashboard:
         self.selected = 0
         self.tool_selected = 0
         self.in_tools = False
+        self.protocol_view_key: str | None = None
+        self.protocol_tab = 0
         self.numeric = ""
         self.toast = ""
         self.toast_until = 0.0
@@ -464,7 +466,8 @@ class Dashboard:
     def _detail(self, row: Row, y: int, x: int, height: int, width: int) -> None:
         self._box(y, x, height, width, row.title.upper(), row.color)
         inner_y = y + 1
-        self.put(inner_y, x + 2, f"{row.group.title()}  ·  option {self.selected + 1:02}", "dim")
+        option_number = LEGACY_ORDER.index(row.key) + 1
+        self.put(inner_y, x + 2, f"{row.group.title()}  ·  option {option_number:02}", "dim")
         inner_y += 2
         state_color = "ok" if row.state in {"Active", "Service active"} else "amber" if "Partial" in row.state else "error"
         details = (("STATUS", row.state), ("SERVICE", row.engine), ("PORTS", row.ports), ("ACCOUNTS", row.count))
@@ -482,13 +485,117 @@ class Dashboard:
         inner_y += 1
         self.put(inner_y, x + 2, "ACTIONS", row.color, bold=True)
         inner_y += 1
-        for text in ("Enter / A  Open protocol manager", "Tab  Settings & tools"):
+        for text in ("Enter  Open protocol screen", "A  Open account manager", "Tab  Settings & tools"):
             if inner_y >= y + height - 1:
                 break
             self.put(inner_y, x + 2, text, "text")
             inner_y += 1
         if row.detail and inner_y < y + height - 1:
             self.put(inner_y, x + 2, row.detail, "dim", width=width - 5)
+
+    def _protocol_accounts(self, key: str) -> list[dict[str, object]] | None:
+        """Read account rows from existing backend providers; never synthesize records."""
+        try:
+            import services_manager
+            if key in {"ssh", "dropbear", "udp"}:
+                names = services_manager.selectable_account_names("ssh")
+                return services_manager.account_roster_rows("ssh", names)
+            if key in {"vmess", "vless", "trojan", "shadowsocks"}:
+                names = services_manager.selectable_account_names(key)
+                return services_manager.account_roster_rows(key, names,
+                    connection_unknown="Shared Xray gateway; per-account sessions unavailable")
+            def expiry(record: dict) -> str:
+                try:
+                    import terminal_ui
+                    return terminal_ui.expiry_status(record.get("expires_at"))
+                except (ImportError, TypeError, ValueError):
+                    return "—"
+
+            if key == "wireguard":
+                import wireguard_manager
+                peers = wireguard_manager.list_peers()
+                rows = []
+                for name, record in sorted(peers.items(), key=lambda item: item[0].casefold()):
+                    rows.append({"name": name, "connection": "—", "status": expiry(record),
+                                 "expires": record.get("expires_at", "unknown"), "details": "WireGuard peer"})
+                return rows
+            if key in {"dnstt", "slowdns"}:
+                import dnstt_manager
+                rows = []
+                for name, record in sorted(dnstt_manager.list_accounts().items(), key=lambda item: item[0].casefold()):
+                    rows.append({"name": name, "connection": "SERVICE", "status": expiry(record),
+                                 "expires": record.get("expires_at", "unknown"), "details": "DNSTT endpoint"})
+                return rows
+            if key == "openvpn":
+                import openvpn_manager
+                accounts = openvpn_manager._account_state().get("accounts", {})
+                return [{"name": name, "connection": "—", "status": expiry(record),
+                         "expires": record.get("expires_at", "unknown"), "details": "OpenVPN certificate"}
+                        for name, record in sorted(accounts.items(), key=lambda item: item[0].casefold())
+                        if record.get("protocol") == "openvpn"]
+        except (ImportError, OSError, ValueError, RuntimeError, KeyError, TypeError):
+            return None
+        return None
+
+    def _draw_protocol_screen(self, width: int, height: int) -> None:
+        key = self.protocol_view_key
+        row = next(item for item in self.rows if item.key == key)
+        number = LEGACY_ORDER.index(key) + 1
+        tabs = ("Accounts", "Create", "Trial", "Service")
+        self.stdscr.erase()
+        self._header(width)
+        self._box(3, 1, height - 7, width - 2, f"{row.title.upper()}  ·  OPTION {number:02}", row.color)
+        self.put(4, 3, f"{row.group}  /  {row.engine}  /  {row.ports}", "dim", width=width - 6)
+        tab_y = 6
+        tab_x = 3
+        for index, tab in enumerate(tabs):
+            label = f"[{tab}]" if index == self.protocol_tab else f" {tab} "
+            color = row.color if index == self.protocol_tab else "dim"
+            self.put(tab_y, tab_x, label, color, bold=index == self.protocol_tab,
+                     reverse=index == self.protocol_tab)
+            tab_x += len(label) + 3
+        self.put(7, 2, ("-" if self.ascii else "─") * (width - 4), "line")
+        body_top = 9
+        body_bottom = height - 5
+        if self.protocol_tab == 0:
+            self.put(body_top, 3, "#   ACCOUNT                 CONNECTION       STATUS      VALID UNTIL", "blue", bold=True)
+            self.put(body_top + 1, 2, ("-" if self.ascii else "─") * (width - 4), "line")
+            accounts = self._protocol_accounts(key)
+            if accounts is None:
+                self.put(body_top + 3, 4, "Account data is unavailable from the current manager.", "amber")
+            elif not accounts:
+                self.put(body_top + 3, 4, f"No {row.title} accounts are registered.", "dim")
+                self.put(body_top + 4, 4, "Press C to open the existing manager and create one.", "text")
+            else:
+                first_row = body_top + 2
+                max_accounts = max(0, (body_bottom - first_row + 2) // 3)
+                for index, account in enumerate(accounts[:max_accounts], 1):
+                    y = first_row + (index - 1) * 3
+                    status = str(account.get("status", "—"))
+                    color = "error" if status == "EXPIRED" else "ok" if status in {"ACTIVE", "RUNNING"} else "dim"
+                    self.put(y, 3, f"{index:02}", "dim", width=3)
+                    self.put(y, 7, account.get("name", "—"), "text", width=max(14, width // 3))
+                    self.put(y, width // 2, account.get("connection", "—"), "amber", width=16)
+                    self.put(y, width // 2 + 17, status, color, width=12)
+                    self.put(y, width - 22, account.get("expires", "—"), "dim", width=18)
+                    self.put(y + 1, 7, account.get("details", ""), "dim", width=width - 12)
+        elif self.protocol_tab in {1, 2}:
+            action = "CREATE ACCOUNT" if self.protocol_tab == 1 else "CREATE TRIAL"
+            self.put(body_top, 3, action, row.color, bold=True)
+            self.put(body_top + 2, 3, "Account input and validation are handled by the existing protocol manager.", "text", width=width - 6)
+            self.put(body_top + 4, 3, "Press Enter to open its real account workflow.", "mint", bold=True)
+            if self.protocol_tab == 2:
+                self.put(body_top + 6, 3, "Trial lifetime and expiry use the manager's configured limits.", "dim", width=width - 6)
+        else:
+            state_color = "ok" if row.state in {"Active", "Service active"} else "amber"
+            for offset, (label, value) in enumerate((("SERVICE STATE", row.state), ("ENGINE", row.engine),
+                                                       ("LISTENERS", row.ports), ("DETAIL", row.detail))):
+                self.put(body_top + offset * 2, 3, label, "dim", bold=True, width=18)
+                self.put(body_top + offset * 2, 22, value, state_color if offset == 0 else "text", width=width - 26)
+            self.put(body_top + 9, 3, "Press Enter to open the existing service controls.", "mint", bold=True)
+        help_text = "←/→ tabs · A accounts · C create · T trial · S service · Esc back"
+        self.put(height - 2, 2, help_text, "dim", width=width - 4)
+        self.stdscr.refresh()
 
     def _tools(self, y: int, width: int) -> None:
         self.put(y, 1, "SETTINGS & TOOLS", "amber", bold=True)
@@ -519,6 +626,9 @@ class Dashboard:
         except Exception as exc:
             self.toast = f"State refresh failed: {exc}"
             self.toast_until = time.monotonic() + 4
+        if self.protocol_view_key:
+            self._draw_protocol_screen(width, height)
+            return
         fingerprint = (width, height, self.selected, self.tool_selected, self.in_tools,
                        tuple((row.key, row.state, row.count, row.detail) for row in self.rows),
                        tuple(self.snapshot.items()), self.toast if time.monotonic() < self.toast_until else "")
@@ -618,7 +728,9 @@ class Dashboard:
                 return self._confirm_quit()
             self._open_backend(number)
         else:
-            self._open_backend(PROTOCOL_ORDER[self.selected])
+            self.protocol_view_key = PROTOCOL_ORDER[self.selected]
+            self.protocol_tab = 0
+            self.last_draw = None
         return False
 
     def _number_action(self) -> bool:
@@ -638,7 +750,8 @@ class Dashboard:
             protocol_key = _legacy_protocol_key(value)
             self.selected = PROTOCOL_ORDER.index(protocol_key)
             self.in_tools = False
-            self._open_backend(protocol_key)
+            self.protocol_view_key = protocol_key
+            self.protocol_tab = 0
             return False
         if value in {13, 14, 15}:
             self.in_tools = True
@@ -655,6 +768,33 @@ class Dashboard:
                 key = self.stdscr.get_wch()
             except curses.error:
                 self.draw()
+                continue
+            if self.protocol_view_key:
+                key_name = self.protocol_view_key
+                if key == curses.KEY_RESIZE:
+                    self.stdscr.clearok(True)
+                elif key in {curses.KEY_LEFT, "h"}:
+                    self.protocol_tab = (self.protocol_tab - 1) % 4
+                elif key in {curses.KEY_RIGHT, "l"}:
+                    self.protocol_tab = (self.protocol_tab + 1) % 4
+                elif key in {"a", "A"}:
+                    self.protocol_tab = 0
+                elif key in {"c", "C"}:
+                    self.protocol_tab = 1
+                    self._open_backend(key_name)
+                elif key in {"t", "T"}:
+                    self.protocol_tab = 2
+                    self._open_backend(key_name)
+                elif key in {"s", "S"}:
+                    self.protocol_tab = 3
+                elif key in {"\n", "\r", curses.KEY_ENTER}:
+                    if self.protocol_tab in {1, 2, 3}:
+                        self._open_backend(key_name)
+                elif key in {"\x1b", "\x08", "\x7f", curses.KEY_BACKSPACE, "q", "Q"}:
+                    self.protocol_view_key = None
+                    self.last_draw = None
+                self.last_draw = None
+                self.draw(force=True)
                 continue
             if key == curses.KEY_RESIZE:
                 self.stdscr.clearok(True)
