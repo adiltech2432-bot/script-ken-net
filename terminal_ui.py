@@ -16,25 +16,63 @@ RESET = "\033[0m"
 
 
 def heading(title: str, color: str = CYAN) -> None:
-    width = max(56, min(shutil.get_terminal_size((80, 24)).columns, 100))
+    width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
     print(f"\n{color}╭{'─' * (width - 2)}╮")
-    print(f"│ {title[:width - 4].center(width - 4)} │")
+    visible_title = title if len(title) <= width - 4 else title[:width - 7] + "..."
+    print(f"│ {visible_title.center(width - 4)} │")
     print(f"╰{'─' * (width - 2)}╯{RESET}")
 
 
 def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2, color: str = BLUE) -> None:
     heading(title, color)
-    terminal_width = shutil.get_terminal_size((80, 24)).columns
-    columns = max(1, min(columns, terminal_width // 32))
-    cell_width = min(36, max(28, (terminal_width - 2) // columns))
+    terminal_width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
+    gap = "   "
+    columns = max(1, min(columns, max(1, (terminal_width + len(gap)) // 34)))
+    cell_width = max(30, (terminal_width - len(gap) * (columns - 1)) // columns)
+    inner_width = cell_width - 4
     groups = [options[index:index + columns] for index in range(0, len(options), columns)]
     for group in groups:
-        top = "   ".join("╭" + "─" * (cell_width - 2) + "╮" for _ in group)
-        body = "   ".join("│ " + f"[{key}] {label}"[:cell_width - 4].ljust(cell_width - 4) + " │" for key, label in group)
-        bottom = "   ".join("╰" + "─" * (cell_width - 2) + "╯" for _ in group)
-        print(color + top + RESET)
-        print(color + body + RESET)
-        print(color + bottom + RESET)
+        cards: list[list[str]] = []
+        for key, label in group:
+            marker = f"[{key}]"
+            label_lines = textwrap.wrap(str(label), width=max(8, inner_width - len(marker) - 1),
+                                        break_long_words=True, break_on_hyphens=False) or [""]
+            card_lines = [f"{marker} {label_lines[0]}"]
+            card_lines.extend((" " * (len(marker) + 1)) + line for line in label_lines[1:])
+            cards.append(card_lines)
+        height = max(map(len, cards), default=1) + 2
+        for row in range(height):
+            if row == 0:
+                parts = ["╭" + "─" * (cell_width - 2) + "╮" for _ in group]
+            elif row == height - 1:
+                parts = ["╰" + "─" * (cell_width - 2) + "╯" for _ in group]
+            else:
+                parts = []
+                for card in cards:
+                    content = card[row - 1] if row - 1 < len(card) else ""
+                    parts.append("│ " + content[:inner_width].ljust(inner_width) + " │")
+            print(color + gap.join(parts) + RESET)
+
+
+def metric_cards(items: list[tuple[str, object]], *, columns: int = 4, color: str = CYAN) -> None:
+    """Render compact dashboard metrics in evenly sized terminal cards."""
+    if not items:
+        return
+    width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
+    gap = "  "
+    columns = max(1, min(columns, len(items), max(1, (width + len(gap)) // 20)))
+    cell_width = max(18, (width - len(gap) * (columns - 1)) // columns)
+    for start in range(0, len(items), columns):
+        group = items[start:start + columns]
+        value_lines = [textwrap.wrap(str(value), width=cell_width - 4, break_long_words=True,
+                                     break_on_hyphens=False) or [""] for _label, value in group]
+        print(color + gap.join("╭" + "─" * (cell_width - 2) + "╮" for _ in group) + RESET)
+        labels = [str(label)[:cell_width - 4] for label, _value in group]
+        print(color + gap.join("│ " + label.center(cell_width - 4) + " │" for label in labels) + RESET)
+        for row in range(max(map(len, value_lines), default=1)):
+            values = [lines[row] if row < len(lines) else "" for lines in value_lines]
+            print(GREEN + gap.join("│ " + value.center(cell_width - 4) + " │" for value in values) + RESET)
+        print(color + gap.join("╰" + "─" * (cell_width - 2) + "╯" for _ in group) + RESET)
 
 
 def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "", color: str = GREEN) -> None:

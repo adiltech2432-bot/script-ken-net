@@ -91,8 +91,8 @@ def dashboard() -> None:
     import terminal_ui
     width = max(58, min(shutil.get_terminal_size((80, 24)).columns, 100))
     terminal_ui.heading("KEN-NET  •  SERVER MANAGEMENT PANEL")
-    print(f"{cpu}   {ram}   {disk_uptime}")
-    print(f"DOMAIN  {domain}")
+    terminal_ui.metric_cards([("CPU LOAD", cpu), ("MEMORY", ram), ("DISK / UPTIME", disk_uptime)], columns=3)
+    print(f"{terminal_ui.CYAN}DOMAIN{terminal_ui.RESET}  {terminal_ui.GREEN}{domain}{terminal_ui.RESET}")
     totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan", "shadowsocks")}
     wg_total = dnstt_total = wg_online = dnstt_ready = 0
     try:
@@ -119,12 +119,15 @@ def dashboard() -> None:
         xray_online = {key: services_manager.active_connections(key).get("active connections (not unique users)", 0) for key in ("vless", "vmess", "trojan")}
     except (ImportError, OSError, ValueError):
         xray_online = {key: 0 for key in ("vless", "vmess", "trojan")}
-    for key, label in (("ssh", "SSH"), ("vmess", "VMESS"), ("vless", "VLESS"), ("trojan", "TROJAN")):
-        online = live_ssh if key == "ssh" else xray_online.get(key, 0)
-        qualifier = "sessions" if key in {"vmess", "vless", "trojan"} else "online"
-        print(f"  {label:<8} {online:>3} {qualifier:<8} • {totals.get(key, 0):>3} accounts")
-    print(f"  {'WIREGUARD':<8} {wg_online:>3} peers    • {wg_total:>3} accounts")
-    print(f"  {'DNSTT':<8} {dnstt_ready:>3} services • {dnstt_total:>3} endpoints")
+    terminal_ui.heading("ACCOUNT OVERVIEW", terminal_ui.CYAN)
+    terminal_ui.metric_cards([
+        ("SSH", f"{live_ssh} online  /  {totals['ssh']} accounts"),
+        ("VMESS", f"{xray_online['vmess']} sessions  /  {totals['vmess']} accounts"),
+        ("VLESS", f"{xray_online['vless']} sessions  /  {totals['vless']} accounts"),
+        ("TROJAN", f"{xray_online['trojan']} sessions  /  {totals['trojan']} accounts"),
+        ("WIREGUARD", f"{wg_online} peers  /  {wg_total} accounts"),
+        ("DNSTT", f"{dnstt_ready} active  /  {dnstt_total} endpoints"),
+    ], columns=3)
     protocol_options = [("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"),
                         ("05", "SHADOWSOCKS"), ("06", "DROPBEAR"), ("07", "OPENVPN"),
                         ("08", "UDP CUSTOM"), ("09", "WIREGUARD"), ("10", "SLOWDNS"),
