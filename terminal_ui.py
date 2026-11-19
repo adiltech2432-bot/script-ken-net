@@ -65,14 +65,17 @@ def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "",
         print(f"{GREEN}{value}{RESET}")
 
 
-def select_account(title: str, names: list[str]) -> str | None:
+def select_account(title: str, names: list[str], *, expired: dict[str, str] | None = None) -> str | None:
     """Show the roster before an account action; return a selected name or None."""
     if not names:
         print(f"{title}: no accounts are registered.")
         return None
     names = sorted(set(names), key=str.casefold)
+    expired = expired or {}
     account_roster(title + " — SELECT ACCOUNT", [
-        {"name": name, "connection": "—", "status": "SELECT", "expires": "—"}
+        {"name": name, "connection": "OFFLINE" if name in expired else "—",
+         "status": "EXPIRED" if name in expired else "SELECT",
+         "expires": expired.get(name, "—")}
         for name in names
     ])
     print(f"{YELLOW}[0] Cancel{RESET}")

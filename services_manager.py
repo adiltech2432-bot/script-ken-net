@@ -108,7 +108,8 @@ def _archive_expired(protocol: str, username: str, record: dict) -> None:
     archived[key] = {"protocol": protocol, "username": username,
                      "expires_at": record.get("expires_at", "unknown"),
                      "expired_at": dt.date.today().isoformat(),
-                     "trial": bool(record.get("trial"))}
+                     "trial": bool(record.get("trial")),
+                     "max_ips": int(record.get("max_ips", 0) or 0)}
     _atomic(EXPIRED_STATE, json.dumps(archived, indent=2) + "\n")
 
 
@@ -119,6 +120,46 @@ def expired_accounts(protocol: str) -> list[dict]:
         return []
     return sorted((record for record in archived.values()
                    if record.get("protocol") == protocol), key=lambda item: item.get("username", "").casefold())
+
+
+def selectable_account_names(protocol: str) -> list[str]:
+    """Include live records and archived expired identities in account actions."""
+    live = ssh_list() if protocol == "ssh" else xray_list(protocol)
+    expired = [str(record.get("username", "")) for record in expired_accounts(protocol)]
+    return sorted({name for name in [*live, *expired] if name}, key=str.casefold)
+
+
+def forget_expired_account(protocol: str, username: str) -> None:
+    """Remove an already-revoked account's history entry after explicit deletion."""
+    try:
+        archived = json.loads(EXPIRED_STATE.read_text(encoding="utf-8")) if EXPIRED_STATE.exists() else {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Could not read the expired-account archive") from exc
+    key = f"{protocol}:{username}"
+    if key not in archived:
+        raise ValueError("Expired account archive record not found")
+    del archived[key]
+    _atomic(EXPIRED_STATE, json.dumps(archived, indent=2) + "\n")
+
+
+def restore_expired_account(protocol: str, username: str, days: int) -> str | None:
+    """Recreate an expired account under the same name, then clear its archive entry."""
+    archived = next((item for item in expired_accounts(protocol)
+                     if item.get("username") == username), None)
+    if not archived:
+        raise ValueError("Expired account archive record not found")
+    if protocol == "ssh":
+        password = _prompt_ssh_password()
+        try:
+            max_ips = int(input("Maximum simultaneous connected IPs [1, 0=unlimited]: ").strip() or "1")
+        except ValueError as exc:
+            raise ValueError("Allowed IP count must be a number") from exc
+        credential = ssh_add(username, days, password=password, max_ips=max_ips)
+    else:
+        credential = xray_add(protocol, username, days)
+    forget_expired_account(protocol, username)
+    show_created_account(protocol, username, credential, days)
+    return credential
 
 
 def account_roster_rows(protocol: str, names: list[str], *, connections: dict[str, int] | None = None,
@@ -1244,20 +1285,37 @@ def account_menu(protocol: str) -> None:
                     credential = xray_add(protocol, username, days, trial=trial, trial_minutes=trial_minutes)
                     show_created_account(protocol, username, credential, days, trial=trial)
             elif choice == "3":
-                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
-                username = terminal_ui.select_account(title, names)
+                purge_expired()
+                names = selectable_account_names(protocol)
+                expired = {str(record.get("username", "")): str(record.get("expires_at", "—"))
+                           for record in expired_accounts(protocol)}
+                username = terminal_ui.select_account(title, names, expired=expired)
                 if username is None: continue
                 days = int(input("Extend validity by days [30]: ").strip() or "30")
-                if protocol == "ssh": ssh_renew(username, days)
-                else: xray_renew(protocol, username, days)
-                print("Account renewed.")
+                live_names = set(ssh_list() if protocol == "ssh" else xray_list(protocol))
+                if username in live_names:
+                    if protocol == "ssh": ssh_renew(username, days)
+                    else: xray_renew(protocol, username, days)
+                    print("Account renewed.")
+                else:
+                    restore_expired_account(protocol, username, days)
+                    print("Expired account recreated with the same username.")
             elif choice == "4":
-                names = ssh_list() if protocol == "ssh" else xray_list(protocol)
-                username = terminal_ui.select_account(title, names)
+                purge_expired()
+                names = selectable_account_names(protocol)
+                expired = {str(record.get("username", "")): str(record.get("expires_at", "—"))
+                           for record in expired_accounts(protocol)}
+                username = terminal_ui.select_account(title, names, expired=expired)
                 if username is None: continue
-                if input(f"Delete {username} and revoke its access? Type YES: ").strip() == "YES":
-                    if protocol == "ssh": ssh_remove(username)
-                    else: xray_remove(protocol, username)
+                live_names = set(ssh_list() if protocol == "ssh" else xray_list(protocol))
+                action = (f"Delete {username} and revoke its access?" if username in live_names
+                          else f"Delete the archived expired record for {username}?")
+                if input(action + " Type YES: ").strip() == "YES":
+                    if username in live_names:
+                        if protocol == "ssh": ssh_remove(username)
+                        else: xray_remove(protocol, username)
+                    else:
+                        forget_expired_account(protocol, username)
                     print("Account deleted.")
             elif choice == "5":
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
