@@ -122,14 +122,15 @@ def dashboard() -> None:
     print(f"{terminal_ui.GREEN}SSH {live_ssh}/{totals['ssh']}  VMESS {xray_online['vmess']}/{totals['vmess']}  "
           f"VLESS {xray_online['vless']}/{totals['vless']}  TROJAN {xray_online['trojan']}/{totals['trojan']}{terminal_ui.RESET}")
     print(f"{terminal_ui.GREEN}WIREGUARD {wg_online}/{wg_total} peers  DNSTT {dnstt_ready}/{dnstt_total} active endpoints{terminal_ui.RESET}")
-    protocol_options = [("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"),
-                        ("05", "SHADOWSOCKS"), ("06", "DROPBEAR"), ("07", "OPENVPN"),
-                        ("08", "UDP CUSTOM"), ("09", "WIREGUARD"), ("10", "SLOWDNS"),
-                        ("11", "DNSTT"), ("12", "TLS / DOMAIN")]
-    terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options, columns=3, clear=False, compact=True)
+    protocol_options = [("01", "◆ SSH"), ("02", "◉ VMESS"), ("03", "◇ VLESS"), ("04", "● TROJAN"),
+                        ("05", "▧ SHADOWSOCKS"), ("06", "▣ DROPBEAR"), ("07", "◍ OPENVPN"),
+                        ("08", "↯ UDP CUSTOM"), ("09", "◈ WIREGUARD"), ("10", "≋ SLOWDNS"),
+                        ("11", "⇄ DNSTT"), ("12", "✦ TLS / DOMAIN")]
+    terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options,
+                             columns=3, clear=False, colorful=True)
     terminal_ui.option_cards("SETTINGS & TOOLS", [("13", "System settings"), ("14", "Protocol status"),
                            ("15", "Services / ports"), ("0", "Exit")], columns=2,
-                           color=terminal_ui.YELLOW, clear=False, compact=True)
+                           color=terminal_ui.YELLOW, clear=False)
     print("\n" + "─ " * (width // 2))
     print("Select option [0-15]: ", end="", flush=True)
 

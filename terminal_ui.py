@@ -32,7 +32,8 @@ def heading(title: str, color: str = CYAN) -> None:
 
 
 def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2,
-                 color: str = BLUE, clear: bool = True, compact: bool = False) -> None:
+                 color: str = BLUE, clear: bool = True, compact: bool = False,
+                 colorful: bool = False) -> None:
     if clear:
         clear_screen()
     heading(title, color)
@@ -42,16 +43,19 @@ def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2
     cell_width = max(24, (terminal_width - len(gap) * (columns - 1)) // columns)
     inner_width = cell_width - 4
     groups = [options[index:index + columns] for index in range(0, len(options), columns)]
-    for group in groups:
+    palette = (CYAN, GREEN, BLUE, MAGENTA, YELLOW)
+    for group_index, group in enumerate(groups):
+        group_colors = [palette[(group_index * columns + index) % len(palette)] if colorful else color
+                        for index in range(len(group))]
         if compact:
             parts = []
-            for key, label in group:
+            for (key, label), item_color in zip(group, group_colors):
                 content = f" [{key}] {label} "
                 available = cell_width - 2
                 if len(content) > available:
                     content = content[:available - 1] + " "
-                parts.append("╭" + content + "─" * (available - len(content)) + "╮")
-            print(color + gap.join(parts) + RESET)
+                parts.append(item_color + "╭" + content + "─" * (available - len(content)) + "╮" + RESET)
+            print(gap.join(parts))
             continue
         cards: list[list[str]] = []
         for key, label in group:
@@ -64,15 +68,15 @@ def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2
         height = max(map(len, cards), default=1) + 2
         for row in range(height):
             if row == 0:
-                parts = ["╭" + "─" * (cell_width - 2) + "╮" for _ in group]
+                parts = [item_color + "╭" + "─" * (cell_width - 2) + "╮" + RESET for item_color in group_colors]
             elif row == height - 1:
-                parts = ["╰" + "─" * (cell_width - 2) + "╯" for _ in group]
+                parts = [item_color + "╰" + "─" * (cell_width - 2) + "╯" + RESET for item_color in group_colors]
             else:
                 parts = []
-                for card in cards:
+                for card, item_color in zip(cards, group_colors):
                     content = card[row - 1] if row - 1 < len(card) else ""
-                    parts.append("│ " + content[:inner_width].ljust(inner_width) + " │")
-            print(color + gap.join(parts) + RESET)
+                    parts.append(item_color + "│ " + content[:inner_width].ljust(inner_width) + " │" + RESET)
+            print(gap.join(parts))
 
 
 def metric_cards(items: list[tuple[str, object]], *, columns: int = 4, color: str = CYAN) -> None:
@@ -98,24 +102,32 @@ def metric_cards(items: list[tuple[str, object]], *, columns: int = 4, color: st
 
 def detail_card(title: str, fields: list[tuple[str, object]], *, note: str = "", color: str = GREEN) -> None:
     width = max(62, min(shutil.get_terminal_size((80, 24)).columns, 100))
-    inner = width - 4
+    inner = width - 8
     print(f"\n{color}╭{'─' * (width - 2)}╮")
-    print(f"│ {title[:inner].center(inner)} │")
+    print(f"│ {title[:width - 4].center(width - 4)} │")
     print(f"├{'─' * (width - 2)}┤{RESET}")
     # Connection URIs are printed after the card as plain, isolated lines. Keeping
     # them out of a fixed-width box avoids inserting indentation or border text
     # into manual terminal selections, especially in narrow SSH clients.
     links = [(label, str(value)) for label, value in fields if label.lower().startswith("link ")]
     fields = [(label, value) for label, value in fields if not label.lower().startswith("link ")]
+    label_width = min(28, max(18, max((len(str(label)) for label, _ in fields), default=18)))
+    value_width = max(20, inner - label_width)
     for label, value in fields:
-        wrapped = textwrap.wrap(str(value), width=max(20, inner - 23), break_long_words=True, break_on_hyphens=False) or [""]
-        for index, line in enumerate(wrapped):
-            prefix = f"{label:<19}: " if index == 0 else " " * 21
-            print(f"{color}│ {prefix}{line[:inner - len(prefix)].ljust(inner - len(prefix))} │{RESET}")
+        label_lines = textwrap.wrap(str(label), width=label_width, break_long_words=True,
+                                    break_on_hyphens=False) or [""]
+        value_lines = textwrap.wrap(str(value), width=value_width, break_long_words=True,
+                                    break_on_hyphens=False) or [""]
+        row_count = max(len(label_lines), len(value_lines))
+        for index in range(row_count):
+            key = label_lines[index] if index < len(label_lines) else ""
+            val = value_lines[index] if index < len(value_lines) else ""
+            print(f"{CYAN}│ {key:<{label_width}}{RESET} {color}│ {val:<{value_width}} │{RESET}")
     if note:
         print(f"{color}├{'─' * (width - 2)}┤{RESET}")
-        for line in textwrap.wrap(note, width=inner):
-            print(f"{YELLOW}│ {line.ljust(inner)} │{RESET}")
+        note_width = width - 4
+        for line in textwrap.wrap(note, width=note_width):
+            print(f"{YELLOW}│ {line.ljust(note_width)} │{RESET}")
     print(f"{color}╰{'─' * (width - 2)}╯{RESET}")
     for label, value in links:
         print(f"\n{CYAN}{label}:{RESET}")
