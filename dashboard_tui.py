@@ -13,6 +13,9 @@ import platform
 import shutil
 import subprocess
 import time
+import secrets
+import getpass
+import json
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass
@@ -305,6 +308,11 @@ class Dashboard:
         self.in_tools = False
         self.protocol_view_key: str | None = None
         self.protocol_tab = 0
+        self.protocol_subview = "main"
+        self.account_index = 0
+        self.account_scroll = 0
+        self.account_name: str | None = None
+        self.protocol_numeric = ""
         self.numeric = ""
         self.toast = ""
         self.toast_until = 0.0
@@ -497,9 +505,13 @@ class Dashboard:
         """Read account rows from existing backend providers; never synthesize records."""
         try:
             import services_manager
-            if key in {"ssh", "dropbear", "udp"}:
+            if key in {"ssh", "dropbear"}:
                 names = services_manager.selectable_account_names("ssh")
-                return services_manager.account_roster_rows("ssh", names)
+                connections = services_manager.active_connections("ssh")
+                return services_manager.account_roster_rows("ssh", names, connections=connections)
+            if key == "udp":
+                names = services_manager.udp_list()
+                return services_manager.account_roster_rows("udp", names)
             if key in {"vmess", "vless", "trojan", "shadowsocks"}:
                 names = services_manager.selectable_account_names(key)
                 return services_manager.account_roster_rows(key, names,
@@ -541,61 +553,418 @@ class Dashboard:
         key = self.protocol_view_key
         row = next(item for item in self.rows if item.key == key)
         number = LEGACY_ORDER.index(key) + 1
-        tabs = ("Accounts", "Create", "Trial", "Service")
+        tabs = (("1", "Accounts"), ("2", "Create"), ("3", "Trial"), ("4", "Service"))
         self.stdscr.erase()
         self._header(width)
-        self._box(3, 1, height - 7, width - 2, f"{row.title.upper()}  ·  OPTION {number:02}", row.color)
-        self.put(4, 3, f"{row.group}  /  {row.engine}  /  {row.ports}", "dim", width=width - 6)
-        tab_y = 6
-        tab_x = 3
-        for index, tab in enumerate(tabs):
-            label = f"[{tab}]" if index == self.protocol_tab else f" {tab} "
-            color = row.color if index == self.protocol_tab else "dim"
-            self.put(tab_y, tab_x, label, color, bold=index == self.protocol_tab,
-                     reverse=index == self.protocol_tab)
-            tab_x += len(label) + 3
-        self.put(7, 2, ("-" if self.ascii else "─") * (width - 4), "line")
-        body_top = 9
+        self._box(4, 1, height - 8, width - 2, f"{row.title.upper()}  /  OPTION {number:02}", row.color)
+        self.put(5, 3, f"{row.group}   •   {row.engine}   •   {row.ports}", "dim", width=width - 6)
+        # Compact numbered cards replace the old manager screen while retaining
+        # the familiar dashboard visual language.
+        card_width = max(18, (width - 8) // 4)
+        for index, (digit, label) in enumerate(tabs):
+            x = 3 + index * (card_width + 1)
+            text = f"[{digit}] {label}"
+            left, right, line, vertical = ("+", "+", "-", "|") if self.ascii else ("╭", "╮", "─", "│")
+            self.put(7, x, left + line * max(0, card_width - 2) + right, row.color, width=card_width)
+            self.put(8, x, f"{vertical} {text:<{card_width - 4}} {vertical}", row.color,
+                     bold=index == self.protocol_tab, reverse=index == self.protocol_tab, width=card_width)
+            self.put(9, x, ("+" + line * max(0, card_width - 2) + "+") if self.ascii
+                     else ("╰" + line * max(0, card_width - 2) + "╯"), row.color, width=card_width)
+        body_top = 12
         body_bottom = height - 5
-        if self.protocol_tab == 0:
-            self.put(body_top, 3, "#   ACCOUNT                 CONNECTION       STATUS      VALID UNTIL", "blue", bold=True)
-            self.put(body_top + 1, 2, ("-" if self.ascii else "─") * (width - 4), "line")
-            accounts = self._protocol_accounts(key)
-            if accounts is None:
-                self.put(body_top + 3, 4, "Account data is unavailable from the current manager.", "amber")
-            elif not accounts:
-                self.put(body_top + 3, 4, f"No {row.title} accounts are registered.", "dim")
-                self.put(body_top + 4, 4, "Press C to open the existing manager and create one.", "text")
-            else:
-                first_row = body_top + 2
-                max_accounts = max(0, (body_bottom - first_row + 2) // 3)
-                for index, account in enumerate(accounts[:max_accounts], 1):
-                    y = first_row + (index - 1) * 3
-                    status = str(account.get("status", "—"))
-                    color = "error" if status == "EXPIRED" else "ok" if status in {"ACTIVE", "RUNNING"} else "dim"
-                    self.put(y, 3, f"{index:02}", "dim", width=3)
-                    self.put(y, 7, account.get("name", "—"), "text", width=max(14, width // 3))
-                    self.put(y, width // 2, account.get("connection", "—"), "amber", width=16)
-                    self.put(y, width // 2 + 17, status, color, width=12)
-                    self.put(y, width - 22, account.get("expires", "—"), "dim", width=18)
-                    self.put(y + 1, 7, account.get("details", ""), "dim", width=width - 12)
+        accounts = self._protocol_accounts(key) if self.protocol_tab == 0 or self.protocol_subview == "account" else []
+        if self.protocol_subview == "account":
+            self._draw_account_actions(row, width, body_top, body_bottom, accounts or [])
+        elif self.protocol_tab == 0:
+            self._draw_account_list(row, width, body_top, body_bottom, accounts)
         elif self.protocol_tab in {1, 2}:
-            action = "CREATE ACCOUNT" if self.protocol_tab == 1 else "CREATE TRIAL"
-            self.put(body_top, 3, action, row.color, bold=True)
-            self.put(body_top + 2, 3, "Account input and validation are handled by the existing protocol manager.", "text", width=width - 6)
-            self.put(body_top + 4, 3, "Press Enter to open its real account workflow.", "mint", bold=True)
-            if self.protocol_tab == 2:
-                self.put(body_top + 6, 3, "Trial lifetime and expiry use the manager's configured limits.", "dim", width=width - 6)
+            action = "CREATE ACCOUNT" if self.protocol_tab == 1 else "CREATE TRIAL ACCOUNT"
+            self._box(body_top, 3, min(8, body_bottom - body_top), width - 6, action, row.color)
+            self.put(body_top + 2, 6, f"[{2 if self.protocol_tab == 1 else 3}] Start {action.lower()}", row.color, bold=True)
+            self.put(body_top + 4, 6, "The workflow runs directly here; the legacy protocol menu is not opened.", "dim", width=width - 12)
+            self.put(body_top + 5, 6, "Trial duration: choose from 1 minute to 24 hours.", "amber", width=width - 12) if self.protocol_tab == 2 else None
+            self.put(body_top + 6, 6, "Press the matching number or Enter to continue.", "mint", width=width - 12)
         else:
-            state_color = "ok" if row.state in {"Active", "Service active"} else "amber"
-            for offset, (label, value) in enumerate((("SERVICE STATE", row.state), ("ENGINE", row.engine),
-                                                       ("LISTENERS", row.ports), ("DETAIL", row.detail))):
-                self.put(body_top + offset * 2, 3, label, "dim", bold=True, width=18)
-                self.put(body_top + offset * 2, 22, value, state_color if offset == 0 else "text", width=width - 26)
-            self.put(body_top + 9, 3, "Press Enter to open the existing service controls.", "mint", bold=True)
-        help_text = "←/→ tabs · A accounts · C create · T trial · S service · Esc back"
+            self._draw_service_panel(row, width, body_top, body_bottom)
+        help_text = ("1 Accounts · 2 Create · 3 Trial · 4 Service · 0 Dashboard" if self.protocol_subview == "main"
+                     else "Select account number · 0 Protocol menu" if self.protocol_subview == "accounts"
+                     else "1 Details · 2 Renew · 3 Delete · 4 Edit · 0 Accounts" if self.protocol_subview == "account"
+                     else "1 Restart · 2 Start · 3 Stop · 0 Protocol menu")
         self.put(height - 2, 2, help_text, "dim", width=width - 4)
+        prompt = f"Select option: {self.protocol_numeric}{' ' if self.ascii else '▌'}"
+        hint = "Enter select · Esc back"
+        hint_x = max(1, width - len(hint) - 2)
+        self.put(height - 1, 2, prompt, "mint", bold=True, width=max(16, hint_x - 4))
+        self.put(height - 1, hint_x, hint, "dim", width=len(hint))
         self.stdscr.refresh()
+
+    def _draw_account_list(self, row: Row, width: int, top: int, bottom: int,
+                           accounts: list[dict[str, object]] | None) -> None:
+        box_height = max(6, bottom - top)
+        self._box(top, 3, box_height, width - 6, f"{row.title.upper()}  /  ACCOUNTS", row.color)
+        self.put(top + 1, 5, "#   ACCOUNT                     CONNECTION      STATUS       VALID UNTIL", "blue", bold=True)
+        self.put(top + 2, 4, "─" * (width - 8), "line")
+        if accounts is None:
+            self.put(top + 4, 6, "Account data is unavailable from the protocol manager.", "amber")
+            return
+        if not accounts:
+            self.put(top + 4, 6, f"No {row.title} accounts are registered.", "dim")
+            self.put(top + 5, 6, "Press 2 to create an account or 3 to create a trial.", "mint")
+            return
+        max_rows = max(1, box_height - 4)
+        self.account_scroll = min(self.account_scroll, max(0, len(accounts) - max_rows))
+        if self.account_index < self.account_scroll:
+            self.account_scroll = self.account_index
+        elif self.account_index >= self.account_scroll + max_rows:
+            self.account_scroll = self.account_index - max_rows + 1
+        visible = accounts[self.account_scroll:self.account_scroll + max_rows]
+        for offset, account in enumerate(visible):
+            index = self.account_scroll + offset
+            y = top + 3 + offset
+            status = str(account.get("status", "—"))
+            status_color = "error" if status == "EXPIRED" else "ok" if status in {"ACTIVE", "RUNNING"} else "amber"
+            selected = index == self.account_index
+            self.put(y, 5, f"[{index + 1:02}]", row.color, bold=selected, reverse=selected, width=5)
+            self.put(y, 11, account.get("name", "—"), "text", bold=selected, width=max(12, width // 3 - 2))
+            self.put(y, width // 2, account.get("connection", "—"), "amber", width=14)
+            self.put(y, width // 2 + 15, status, status_color, width=11)
+            self.put(y, width - 23, account.get("expires", "—"), "dim", width=18)
+        if len(accounts) > max_rows and bottom < self.stdscr.getmaxyx()[0] - 2:
+            self.put(bottom, 6, f"Showing {self.account_scroll + 1}-{self.account_scroll + len(visible)} of {len(accounts)} · Up/Down to scroll",
+                     "dim", width=width - 12)
+
+    def _draw_account_actions(self, row: Row, width: int, top: int, bottom: int,
+                              accounts: list[dict[str, object]]) -> None:
+        selected = next((item for item in accounts if item.get("name") == self.account_name), None)
+        if selected is None:
+            self.protocol_subview, self.account_name = "main", None
+            return
+        box_height = max(7, bottom - top)
+        self._box(top, 3, box_height, width - 6,
+                  f"ACCOUNT  /  {str(selected.get('name', '')).upper()}", row.color)
+        self.put(top + 2, 6, f"CONNECTION  {selected.get('connection', '—')}", "amber", bold=True)
+        status = str(selected.get("status", "—"))
+        self.put(top + 2, width // 2, f"STATUS  {status}", "error" if status == "EXPIRED" else "ok", bold=True)
+        self.put(top + 3, 6, f"VALID UNTIL  {selected.get('expires', '—')}", "text")
+        self.put(top + 4, 6, f"INFO  {selected.get('details', '')}", "dim", width=width - 12)
+        actions = "[1] Details  [2] Renew  [3] Delete  [4] Edit  [0] Back"
+        self.put(top + box_height - 2, 6, actions, row.color, bold=True, width=width - 12)
+
+    def _draw_service_panel(self, row: Row, width: int, top: int, bottom: int) -> None:
+        self._box(top, 3, max(8, bottom - top), width - 6, f"{row.title.upper()}  /  SERVICE", row.color)
+        self.put(top + 2, 6, f"STATUS   {row.state}", "ok" if row.state in {"Active", "Service active"} else "amber", bold=True)
+        self.put(top + 3, 6, f"ENGINE   {row.engine}", "text")
+        self.put(top + 4, 6, f"PORTS    {row.ports}", "text", width=width - 12)
+        self.put(top + 5, 6, row.detail, "dim", width=width - 12)
+        self.put(top + 7, 6, "[1] Restart   [2] Start   [3] Stop   [0] Back", row.color, bold=True)
+
+    def _terminal_action(self, title: str, action) -> None:
+        """Temporarily leave curses for secure prompts and manager detail cards."""
+        try:
+            curses.curs_set(1)
+            curses.echo()
+            curses.nocbreak()
+            curses.endwin()
+            print(f"\n=== {title} ===")
+            action()
+            input("\nPress Enter to return...")
+            self.toast = "OK  " + title
+        except (KeyboardInterrupt, EOFError):
+            self.toast = "OK  Action cancelled"
+        except Exception as exc:
+            self.toast = f"ERROR  {exc}"
+        finally:
+            try:
+                curses.reset_prog_mode()
+                self.stdscr.keypad(True)
+                curses.noecho()
+                curses.cbreak()
+                curses.curs_set(0)
+                self.stdscr.clearok(True)
+                self.stdscr.refresh()
+                self.stdscr.timeout(2000)
+            except curses.error:
+                pass
+            self.toast_until = time.monotonic() + 5
+            self.last_draw = None
+
+    @staticmethod
+    def _validity_days() -> int:
+        while True:
+            raw = input("Validity in days [30]: ").strip() or "30"
+            try:
+                days = int(raw)
+            except ValueError:
+                print("Enter a whole number from 1 to 3650.")
+                continue
+            if 1 <= days <= 3650:
+                return days
+            print("Validity must be between 1 and 3650 days.")
+
+    @staticmethod
+    def _new_username(protocol: str, trial: bool) -> str:
+        default = f"trial{secrets.token_hex(3)}" if trial else ""
+        prompt = f"Username [{default}]: " if default else "Username: "
+        return (input(prompt).strip() or default)
+
+    def _create_protocol_account(self, key: str, trial: bool = False) -> None:
+        import services_manager as sm
+        name = self._new_username(key, trial)
+        if not name:
+            raise ValueError("Username is required")
+        trial_minutes = sm.prompt_trial_minutes() if trial else None
+        days = 1 if trial else self._validity_days()
+        if key in {"ssh", "dropbear"}:
+            password = getpass.getpass("Password: ")
+            if not password:
+                raise ValueError("Password is required")
+            max_ips = int(input("Maximum simultaneous connected IPs [1, 0=unlimited]: ").strip() or "1")
+            credential = sm.ssh_add(name, days, trial=trial, trial_minutes=trial_minutes,
+                                    password=password, max_ips=max_ips)
+            sm.show_created_account("ssh", name, credential, days, trial=trial)
+        elif key == "udp":
+            credential = sm.udp_add(name, days, trial=trial)
+            sm.show_created_account("udp", name, credential, days, trial=trial)
+        elif key in {"vmess", "vless", "trojan", "shadowsocks"}:
+            credential = sm.xray_add(key, name, days, trial=trial, trial_minutes=trial_minutes)
+            sm.show_created_account(key, name, credential, days, trial=trial)
+        elif key == "openvpn":
+            import openvpn_manager
+            record = openvpn_manager.add_account(name, days, trial=trial, trial_minutes=trial_minutes)
+            import terminal_ui
+            terminal_ui.detail_card("OPENVPN ACCOUNT", [
+                ("Username", name), ("Host", sm.state().get("domain") or "Set a domain"),
+                ("Profiles", record.get("profile_dir", "—")), ("Valid until", record.get("expires_at", "unknown")),
+                ("Account type", "TRIAL" if trial else "REGULAR"),
+            ], note="Client profiles contain private keys. Transfer them securely.")
+        elif key == "wireguard":
+            import wireguard_manager
+            interface = "wg0"
+            endpoint = input("Public endpoint host:port: ").strip()
+            profile = wireguard_manager.add_peer(interface, name, endpoint, days=days,
+                                                  trial=trial, trial_minutes=trial_minutes)
+            print(f"WireGuard client profile: {profile}")
+        elif key in {"dnstt", "slowdns"}:
+            import dnstt_manager
+            port = int(input("Local client port [7000]: ").strip() or "7000")
+            profile, records = dnstt_manager.add_account(name, local_port=port, days=days,
+                                                          trial=trial, trial_minutes=trial_minutes)
+            print(records)
+            print(f"DNSTT client profile: {profile}")
+        else:
+            raise ValueError("TLS is a shared transport setting. Configure its domain and certificate in TLS / Domain.")
+        self.protocol_subview = "main"
+        self.protocol_tab = 0
+
+    def _show_protocol_account(self, key: str, name: str) -> None:
+        import services_manager as sm
+        if key in {"ssh", "dropbear", "udp", "vmess", "vless", "trojan", "shadowsocks"}:
+            sm.show_account_details(key, name)
+        elif key == "openvpn":
+            import terminal_ui
+            record = sm.account_details("openvpn", name)
+            terminal_ui.detail_card("OPENVPN ACCOUNT", [
+                ("Username", name), ("Host", sm.state().get("domain") or "Set a domain"),
+                ("Certificate CN", record.get("cert_cn", "—")),
+                ("Profiles", record.get("profile_dir", "—")), ("Valid until", record.get("expires_at", "unknown")),
+            ], note="Client profiles contain private keys. Transfer them securely.")
+        elif key == "wireguard":
+            import terminal_ui, wireguard_manager
+            record = wireguard_manager.peer_details("wg0", name)
+            terminal_ui.detail_card("WIREGUARD PEER", [(label, record.get(field, "—")) for label, field in
+                (("Address", "address"), ("Public key", "public_key"), ("Interface", "interface"),
+                 ("Valid until", "expires_at"), ("Last handshake", "last_handshake_epoch"),
+                 ("Client profile", "profile"))])
+        elif key in {"dnstt", "slowdns"}:
+            import terminal_ui, dnstt_manager
+            record = dnstt_manager.account_details(name)
+            terminal_ui.detail_card("DNSTT ENDPOINT", [(label, record.get(field, "—")) for label, field in
+                (("Endpoint", "domain"), ("Local port", "local_port"), ("Service", "service"),
+                 ("Valid until", "expires_at"), ("Profile", "key_dir"))],
+                note="DNSTT does not authenticate clients; protect endpoint details.")
+
+    def _renew_protocol_account(self, key: str, name: str, *, is_edit: bool = False) -> None:
+        import services_manager as sm
+        days = self._validity_days()
+        if key in {"ssh", "dropbear"}:
+            if name in sm.ssh_list():
+                sm.ssh_renew(name, days)
+                if is_edit:
+                    limit = int(input("Maximum simultaneous connected IPs [0=unlimited]: ").strip() or "0")
+                    if not 0 <= limit <= 128:
+                        raise ValueError("Allowed IP count must be from 0 to 128")
+                    if limit:
+                        sm.install_ssh_ip_limit()
+                    data = sm.state(); data["accounts"][name]["max_ips"] = limit
+                    sm._atomic(sm.STATE, json.dumps(data, indent=2) + "\n")
+            else:
+                sm.restore_expired_account("ssh", name, days)
+        elif key == "udp":
+            sm.udp_renew(name, days)
+        elif key in {"vmess", "vless", "trojan", "shadowsocks"}:
+            if name in sm.xray_list(key):
+                sm.xray_renew(key, name, days)
+            else:
+                sm.restore_expired_account(key, name, days)
+        elif key == "openvpn":
+            import openvpn_manager
+            record = openvpn_manager.renew_account(name, days)
+            print("New client profiles:", record.get("profile_dir", "—"))
+        elif key == "wireguard":
+            import wireguard_manager
+            wireguard_manager.renew_peer(name, days)
+        elif key in {"dnstt", "slowdns"}:
+            import dnstt_manager
+            dnstt_manager.renew_account(name, days)
+
+    def _delete_protocol_account(self, key: str, name: str) -> None:
+        import services_manager as sm
+        live = True
+        if key in {"ssh", "dropbear"}:
+            live = name in sm.ssh_list()
+            if live: sm.ssh_remove(name)
+        elif key == "udp":
+            live = name in sm.udp_list()
+            if live: sm.udp_remove(name)
+        elif key in {"vmess", "vless", "trojan", "shadowsocks"}:
+            live = name in sm.xray_list(key)
+            if live: sm.xray_remove(key, name)
+        elif key == "openvpn":
+            import openvpn_manager
+            live = name in openvpn_manager._account_state().get("accounts", {})
+            if live: openvpn_manager.delete_account(name)
+        elif key == "wireguard":
+            import wireguard_manager
+            live = name in wireguard_manager.list_peers()
+            if live: wireguard_manager.remove_peer("wg0", name)
+        elif key in {"dnstt", "slowdns"}:
+            import dnstt_manager
+            live = name in dnstt_manager.list_accounts()
+            if live: dnstt_manager.remove_account(name)
+        if not live and key in {"ssh", "dropbear", "vmess", "vless", "trojan", "shadowsocks"}:
+            sm.forget_expired_account("ssh" if key in {"ssh", "dropbear"} else key, name)
+
+    def _run_service_action(self, key: str, action: str) -> None:
+        units = {
+            "ssh": ["ssh.service"], "dropbear": ["kennet-dropbear.service"],
+            "udp": ["kennet-udp-custom.service"],
+            "vmess": ["xray.service"], "vless": ["xray.service"],
+            "trojan": ["xray.service"], "shadowsocks": ["xray.service"],
+            "openvpn": ["openvpn-server@server-tcp.service", "openvpn-server@server-udp.service"],
+            "wireguard": ["wg-quick@wg0.service"],
+            "dnstt": ["kennet-dnstt-router.service"], "slowdns": ["kennet-dnstt-router.service"],
+        }.get(key)
+        if not units:
+            raise ValueError("TLS / Domain services are managed from System settings > TLS / Domain.")
+        errors = []
+        for unit in units:
+            result = subprocess.run(["systemctl", action, unit], capture_output=True, text=True, check=False)
+            if result.returncode:
+                errors.append((result.stderr or result.stdout or f"{action} {unit} failed").strip())
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def _protocol_operation(self, key: str, tab: int, account_name: str | None = None,
+                            action: int | None = None) -> None:
+        if tab == 1:
+            self._terminal_action(f"Create {key} account", lambda: self._create_protocol_account(key))
+        elif tab == 2:
+            self._terminal_action(f"Create {key} trial account", lambda: self._create_protocol_account(key, True))
+        elif tab == 3 and action in {1, 2, 3}:
+            labels = {1: "restart", 2: "start", 3: "stop"}
+            self._terminal_action(f"{labels[action].title()} {key} service",
+                                  lambda: self._run_service_action(key, labels[action]))
+        elif action == 1 and account_name:
+            self._terminal_action(f"Details for {account_name}", lambda: self._show_protocol_account(key, account_name))
+        elif action == 2 and account_name:
+            self._terminal_action(f"Renew {account_name}", lambda: self._renew_protocol_account(key, account_name))
+        elif action == 3 and account_name:
+            def confirm_delete():
+                if input(f"Delete {account_name}? Type YES: ").strip() == "YES":
+                    self._delete_protocol_account(key, account_name)
+                    print("Account deleted.")
+                else:
+                    print("Deletion cancelled.")
+            self._terminal_action(f"Delete {account_name}", confirm_delete)
+        elif action == 4 and account_name:
+            self._terminal_action(f"Edit {account_name}", lambda: self._renew_protocol_account(key, account_name, is_edit=True))
+        self.last_draw = None
+
+    def _select_account(self, accounts: list[dict[str, object]]) -> None:
+        if not accounts:
+            self.toast = "ERROR  No accounts to select"
+            self.toast_until = time.monotonic() + 3
+            return
+        if not 0 <= self.account_index < len(accounts):
+            self.account_index = 0
+        self.account_name = str(accounts[self.account_index].get("name", ""))
+        self.protocol_subview = "account"
+        self.protocol_numeric = ""
+
+    def _protocol_number_action(self) -> None:
+        """Dispatch the numeric controls shown on the current protocol screen."""
+        raw = self.protocol_numeric
+        self.protocol_numeric = ""
+        try:
+            value = int(raw)
+        except ValueError:
+            self.toast = "ERROR  Choose one of the numbered options on screen"
+            self.toast_until = time.monotonic() + 3
+            return
+        key = self.protocol_view_key
+        if key is None:
+            return
+        if self.protocol_subview == "account":
+            if value not in {0, 1, 2, 3, 4}:
+                self.toast = "ERROR  Choose a numbered account action"
+                self.toast_until = time.monotonic() + 3
+                return
+            if value == 0:
+                self.protocol_subview, self.account_name = "accounts", None
+                return
+            self._protocol_operation(key, 0, self.account_name, value)
+            return
+        if self.protocol_subview == "accounts":
+            if value == 0:
+                self.protocol_subview = "main"
+                return
+            accounts = self._protocol_accounts(key) or []
+            if value < 1 or value > len(accounts):
+                self.toast = f"ERROR  Account number must be 1-{len(accounts)} (or 0 to return)"
+                self.toast_until = time.monotonic() + 3
+                return
+            self.account_index = value - 1
+            self._select_account(accounts)
+            return
+        if self.protocol_subview == "service":
+            if value not in {0, 1, 2, 3}:
+                self.toast = "ERROR  Choose restart, start, stop, or back"
+                self.toast_until = time.monotonic() + 3
+                return
+            if value == 0:
+                self.protocol_subview = "main"
+            elif value in {1, 2, 3}:
+                self._protocol_operation(key, 3, action=value)
+            return
+        if value not in {0, 1, 2, 3, 4}:
+            self.toast = "ERROR  Choose an option from 0 to 4"
+            self.toast_until = time.monotonic() + 3
+            return
+        if value == 0:
+            self.protocol_view_key = None
+            self.protocol_subview, self.account_name = "main", None
+        elif value == 1:
+            self.protocol_tab, self.protocol_subview = 0, "accounts"
+            self.account_index = 0
+        elif value == 2:
+            self.protocol_tab = 1
+            self._protocol_operation(key, 1)
+        elif value == 3:
+            self.protocol_tab = 2
+            self._protocol_operation(key, 2)
+        elif value == 4:
+            self.protocol_tab = 3
+            self.protocol_subview = "service"
 
     def _tools(self, y: int, width: int) -> None:
         self.put(y, 1, "SETTINGS & TOOLS", "amber", bold=True)
@@ -672,6 +1041,13 @@ class Dashboard:
         return key in {"y", "Y"}
 
     def _open_backend(self, key: str | None = None) -> None:
+        if key in PROTOCOL_ORDER:
+            self.protocol_view_key = key
+            self.protocol_tab = 0
+            self.protocol_subview = "main"
+            self.protocol_numeric = ""
+            self.last_draw = None
+            return
         import panel
         try:
             self.stdscr.clear()
@@ -695,10 +1071,7 @@ class Dashboard:
             elif key == "0":
                 raise SystemExit(0)
             else:
-                protocol_key = key if key in PROTOCOL_META else _legacy_protocol_key(int(key))
-                protocol = next(item for item in panel.PROTOCOLS if item.key == protocol_key)
-                panel.manage_protocol(protocol)
-                input("\nPress Enter to return to the dashboard...")
+                raise ValueError(f"Unsupported dashboard action: {key}")
             self.toast = "OK  Returned to dashboard"
         except KeyboardInterrupt:
             self.toast = "OK  Returned to dashboard"
@@ -773,26 +1146,44 @@ class Dashboard:
                 key_name = self.protocol_view_key
                 if key == curses.KEY_RESIZE:
                     self.stdscr.clearok(True)
-                elif key in {curses.KEY_LEFT, "h"}:
+                elif key in {curses.KEY_LEFT, "h"} and self.protocol_subview == "main":
                     self.protocol_tab = (self.protocol_tab - 1) % 4
-                elif key in {curses.KEY_RIGHT, "l"}:
+                elif key in {curses.KEY_RIGHT, "l"} and self.protocol_subview == "main":
                     self.protocol_tab = (self.protocol_tab + 1) % 4
-                elif key in {"a", "A"}:
-                    self.protocol_tab = 0
-                elif key in {"c", "C"}:
-                    self.protocol_tab = 1
-                    self._open_backend(key_name)
-                elif key in {"t", "T"}:
-                    self.protocol_tab = 2
-                    self._open_backend(key_name)
-                elif key in {"s", "S"}:
-                    self.protocol_tab = 3
+                elif key in {curses.KEY_UP, "k"} and self.protocol_subview in {"accounts", "account"}:
+                    accounts = self._protocol_accounts(key_name) or []
+                    if accounts and self.protocol_subview == "accounts":
+                        self.account_index = (self.account_index - 1) % len(accounts)
+                elif key in {curses.KEY_DOWN, "j"} and self.protocol_subview in {"accounts", "account"}:
+                    accounts = self._protocol_accounts(key_name) or []
+                    if accounts and self.protocol_subview == "accounts":
+                        self.account_index = (self.account_index + 1) % len(accounts)
                 elif key in {"\n", "\r", curses.KEY_ENTER}:
-                    if self.protocol_tab in {1, 2, 3}:
-                        self._open_backend(key_name)
+                    if self.protocol_numeric:
+                        self._protocol_number_action()
+                    elif self.protocol_subview == "main":
+                        if self.protocol_tab == 0:
+                            self.protocol_subview = "accounts"
+                        elif self.protocol_tab in {1, 2}:
+                            self._protocol_operation(key_name, self.protocol_tab)
+                        else:
+                            self.protocol_subview = "service"
+                    elif self.protocol_subview == "accounts":
+                        self._select_account(self._protocol_accounts(key_name) or [])
+                    elif self.protocol_subview == "service":
+                        self._protocol_operation(key_name, 3, action=1)
                 elif key in {"\x1b", "\x08", "\x7f", curses.KEY_BACKSPACE, "q", "Q"}:
-                    self.protocol_view_key = None
+                    if self.protocol_numeric:
+                        self.protocol_numeric = self.protocol_numeric[:-1]
+                    elif self.protocol_subview == "account":
+                        self.protocol_subview, self.account_name = "accounts", None
+                    elif self.protocol_subview != "main":
+                        self.protocol_subview = "main"
+                    else:
+                        self.protocol_view_key = None
                     self.last_draw = None
+                elif isinstance(key, str) and key.isdigit() and len(self.protocol_numeric) < 2:
+                    self.protocol_numeric += key
                 self.last_draw = None
                 self.draw(force=True)
                 continue
@@ -851,7 +1242,6 @@ class Dashboard:
 
 def _plain_dashboard() -> int:
     """Safe no-curses fallback for TERM=dumb and non-interactive diagnostics."""
-    import panel
     while True:
         rows, _snapshot = collect_rows()
         if os.isatty(1) and os.environ.get("TERM") != "dumb":
@@ -882,8 +1272,81 @@ def _plain_dashboard() -> int:
             print("Invalid selection.")
 
 
+def _plain_protocol_manager(protocol_key: str) -> None:
+    """Numbered non-curses protocol flow using the same operations as the full TUI."""
+    manager = Dashboard.__new__(Dashboard)
+    manager.protocol_subview = "main"
+    manager.protocol_tab = 0
+    manager.account_name = None
+    manager.account_index = 0
+    label = dict((row.key, row.title) for row in collect_rows()[0]).get(protocol_key, protocol_key.title())
+    while True:
+        print(f"\n=== {label.upper()} ===")
+        print("[1] Accounts   [2] Create   [3] Trial   [4] Service   [0] Dashboard")
+        try:
+            choice = input("Select option: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        try:
+            if choice == "0":
+                return
+            if choice in {"2", "3"}:
+                manager._create_protocol_account(protocol_key, trial=choice == "3")
+                continue
+            if choice == "4":
+                print("[1] Restart   [2] Start   [3] Stop   [0] Back")
+                action = input("Select service action: ").strip()
+                if action in {"1", "2", "3"}:
+                    manager._run_service_action(protocol_key, {"1": "restart", "2": "start", "3": "stop"}[action])
+                    print("Service action completed.")
+                continue
+            if choice != "1":
+                print("Choose an option from 0 to 4.")
+                continue
+            accounts = manager._protocol_accounts(protocol_key) or []
+            if not accounts:
+                print("No accounts are registered.")
+                continue
+            print("\n#   ACCOUNT                         CONNECTION       STATUS       VALID UNTIL")
+            for index, account in enumerate(accounts, 1):
+                print(f"{index:02}  {account.get('name', '—'):<30} {account.get('connection', '—'):<15} "
+                      f"{account.get('status', '—'):<12} {account.get('expires', '—')}")
+            selected = input("Select account number (0 to return): ").strip()
+            if selected == "0":
+                continue
+            if not selected.isdigit() or not 1 <= int(selected) <= len(accounts):
+                print("Invalid account number.")
+                continue
+            name = str(accounts[int(selected) - 1].get("name", ""))
+            while True:
+                print(f"\n=== {name} ===")
+                print("[1] Details   [2] Renew   [3] Delete   [4] Edit settings   [0] Accounts")
+                action = input("Select account action: ").strip()
+                if action == "0":
+                    break
+                if action == "1":
+                    manager._show_protocol_account(protocol_key, name)
+                elif action == "2":
+                    manager._renew_protocol_account(protocol_key, name)
+                elif action == "3":
+                    if input(f"Delete {name}? Type YES: ").strip() == "YES":
+                        manager._delete_protocol_account(protocol_key, name)
+                        print("Account deleted.")
+                    else:
+                        print("Deletion cancelled.")
+                    break
+                elif action == "4":
+                    manager._renew_protocol_account(protocol_key, name, is_edit=True)
+                else:
+                    print("Choose an option from 0 to 4.")
+        except (EOFError, KeyboardInterrupt):
+            print("Action cancelled.")
+        except Exception as exc:
+            print(f"Operation failed: {exc}")
+
+
 def _dispatch_backend(key: str) -> None:
-    """Call the existing manager, status, or tools screen without changing its logic."""
+    """Open a numbered protocol flow, status, or tools screen."""
     import panel
     if key == "13":
         import settings_manager
@@ -899,9 +1362,7 @@ def _dispatch_backend(key: str) -> None:
         raise SystemExit(0)
     else:
         protocol_key = LEGACY_ORDER[int(key) - 1]
-        protocol = next(item for item in panel.PROTOCOLS if item.key == protocol_key)
-        panel.manage_protocol(protocol)
-        input("\nPress Enter to return to the dashboard...")
+        _plain_protocol_manager(protocol_key)
 
 
 def run(force_plain: bool = False) -> int:
