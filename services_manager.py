@@ -418,11 +418,24 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
     try:
         import dnstt_manager
         dns_config = json.loads(dnstt_manager.CONFIG.read_text(encoding="utf-8"))
-        dnstt_host = dns_config.get("nameserver_host", "Not configured")
-        key_files = list(Path(dnstt_manager.ACCOUNT_DIR).glob("*/server.pub"))
-        dns_public_key = key_files[0].read_text(encoding="utf-8").strip() if key_files else "Not configured"
-    except (ImportError, OSError, ValueError, json.JSONDecodeError):
-        dnstt_host = dns_public_key = "Not configured"
+        dnstt_host = str(dns_config.get("nameserver_host") or "Not configured")
+        # Read keys through the account registry so the key shown belongs to a
+        # managed endpoint; a stale directory must not look like a live account.
+        dns_accounts = dnstt_manager.list_accounts()
+        endpoint_keys = []
+        for endpoint_name, endpoint in sorted(dns_accounts.items(), key=lambda item: item[0].casefold()):
+            key_dir = endpoint.get("key_dir")
+            key_file = Path(key_dir) / "server.pub" if key_dir else Path(dnstt_manager.ACCOUNT_DIR) / endpoint_name / "server.pub"
+            try:
+                public_key = key_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if public_key:
+                endpoint_keys.append(f"{endpoint_name} ({endpoint.get('domain', 'unknown')}): {public_key}")
+        dns_public_key = "; ".join(endpoint_keys) if endpoint_keys else "No DNSTT endpoints configured"
+    except (ImportError, OSError, ValueError, AttributeError, json.JSONDecodeError):
+        dnstt_host = "Not configured"
+        dns_public_key = "DNSTT manager/configuration unavailable"
     ovpn_tcp = subprocess.run(["systemctl", "is-active", "--quiet", "openvpn-server@server-tcp.service"], check=False).returncode == 0
     ovpn_udp = subprocess.run(["systemctl", "is-active", "--quiet", "openvpn-server@server-udp.service"], check=False).returncode == 0
     squid = subprocess.run(["systemctl", "is-active", "--quiet", "squid.service"], check=False).returncode == 0
@@ -433,11 +446,11 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("Password", password if password is not None else "Not retrievable after creation; renew/reset it"),
         ("IP", server_ip),
         ("Host", domain),
-        ("Host SlowDNS", "Not configured"),
+        ("Host SlowDNS", "Not included; DNSTT is a separate protocol"),
         ("DNSTT nameserver", dnstt_host),
         ("Location", state().get("location") or "Not configured"),
         ("Port OpenSSH", ssh_ports),
-        ("Port UDP SSH", "Not configured"),
+        ("Port UDP SSH", "Not included; UDP Custom is managed separately"),
         ("Port Dropbear", "109, 143/TCP" if dropbear else "Not installed"),
         ("Port Dropbear WS", "443, 109/TCP" if dropbear and gateway_ready and websocket_ready else "Not configured"),
         ("Port SSH WS SSL", "443/TCP" if gateway_ready and websocket_ready else "Not configured"),
@@ -447,9 +460,9 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("Port OpenVPN SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
         ("Port OpenVPN TCP", "443, 1194/TCP" if ovpn_tcp else "Not installed"),
         ("Port OpenVPN UDP", "2200/UDP" if ovpn_udp else "Not installed"),
-        ("Proxy Squid", "3128/TCP" if squid else "Not installed"),
-        ("BadVPN UDP", ", ".join(badvpn) if badvpn else "Not installed"),
-        ("DNSTT public key", dns_public_key),
+        ("Proxy Squid", "3128/TCP" if squid else "Optional; not installed"),
+        ("BadVPN UDP", ", ".join(badvpn) if badvpn else "Optional; not installed"),
+        ("DNSTT endpoint public keys", dns_public_key),
         ("UDP Custom", f"{domain}:1-65535@{username}:{password or '<password not retrievable>'}" if udp_ready else "Not installed"),
         ("SSH WebSocket", f"{domain}:80@{username}:{password or '<password not retrievable>'}" if gateway_ready and websocket_ready else "Not configured"),
         ("Payload WSS", f"GET /ssh-ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]" if gateway_ready and websocket_ready else "Not configured"),
@@ -965,7 +978,10 @@ def show_account_details(protocol: str, username: str) -> None:
     record = account_details("ssh" if protocol == "dropbear" else protocol, username)
     if protocol in {"ssh", "dropbear", "udp"}:
         if protocol == "ssh":
-            terminal_ui.detail_card("SSH OVPN ACCOUNT", _ssh_account_fields(username, record))
+            terminal_ui.detail_card(
+                "SSH OVPN ACCOUNT", _ssh_account_fields(username, record),
+                note="SSH login uses the OpenSSH port shown above. Optional legacy services marked optional are not required for this account.",
+            )
             return
         if protocol == "udp":
             port_text = "UDP destination ports 1-65535 (reserved VPN/DNS ports excluded)"
@@ -995,10 +1011,13 @@ def show_created_account(protocol: str, username: str, credential: str, days: in
     if protocol in {"ssh", "dropbear", "udp"}:
         if protocol == "ssh":
             ssh_host = current.get("domain") or _server_public_ip()
-            terminal_ui.detail_card("SSH OVPN ACCOUNT", _ssh_account_fields(username,
-                                    {"expires_at": expires, "trial": trial,
-                                     "max_ips": state().get("accounts", {}).get(username, {}).get("max_ips", 0)},
-                                    password=credential))
+            terminal_ui.detail_card(
+                "SSH OVPN ACCOUNT", _ssh_account_fields(username,
+                    {"expires_at": expires, "trial": trial,
+                     "max_ips": state().get("accounts", {}).get(username, {}).get("max_ips", 0)},
+                    password=credential),
+                note="SSH login uses the OpenSSH port shown above. Optional legacy services marked optional are not required for this account.",
+            )
             copy_items = [("OpenSSH command", f"ssh {username}@{ssh_host} -p 22")]
             try:
                 import gateway_manager
