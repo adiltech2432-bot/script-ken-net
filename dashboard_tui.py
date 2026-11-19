@@ -383,42 +383,105 @@ class Dashboard:
         self.put(y + height - 1, x, bl + h * (width - 2) + br, color)
 
     def _header(self, width: int) -> None:
+        title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         if self.ascii:
-            self.put(0, 1, "KEN-NET  |  SERVER MANAGEMENT", "text", bold=True)
-            domain = str(self.snapshot.get("domain", "—"))
-            self.put(0, max(1, width - len(domain) - 3), domain, "blue", bold=True)
-            self.put(1, 1, f"{self.snapshot.get('os', 'Linux')}  |  {self.snapshot.get('uptime', '—')}", "dim")
+            self.put(0, 1, "[U]", "amber", bold=True)
+            self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
         else:
-            self.put(0, 1, "KEN", "text", bold=True)
-            self.put(0, 4, "-", "blue", bold=True)
-            self.put(0, 5, "NET", "text", bold=True)
-            self.put(0, 10, "SERVER MANAGEMENT PANEL", "dim")
-            domain = str(self.snapshot.get("domain", "—"))
-            self.put(0, max(1, width - len(domain) - 3), domain, "rose", bold=True)
-            self.put(1, 1, f"{self.snapshot.get('os', 'Linux')}  ·  {self.snapshot.get('uptime', '—')}", "dim")
+            # Ubuntu's circle-of-friends mark rendered as a compact terminal glyph.
+            self.put(0, 1, "◉", "amber", bold=True)
+            self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
+        os_name = str(self.snapshot.get("os", "Ubuntu"))
+        self.put(1, 1, os_name, "dim", width=max(16, width // 2))
+        domain = str(self.snapshot.get("domain", "—"))
+        self.put(1, max(1, width - len(domain) - 3), domain, "rose", bold=True)
 
     def _metric_line(self, width: int) -> None:
         items = (("LOAD", self.snapshot.get("load")), ("RAM", self.snapshot.get("ram")),
-                 ("DISK", self.snapshot.get("disk")), ("ACTIVE SERVICES", self.snapshot.get("active")))
+                 ("DISK", self.snapshot.get("disk")), ("UPTIME", self.snapshot.get("uptime")))
         gap = max(1, (width - 4) // 4)
-        x = 1
-        for label, value in items:
-            shown = "—" if value is None else f"{value}%" if label != "ACTIVE SERVICES" else str(value)
-            if label == "ACTIVE SERVICES":
-                sample = list(_activity)
-                spark = "".join(SPARK[min(7, n * 8 // max(1, max(sample)))] for n in sample) if sample and not self.ascii else ""
-                shown = shown + (f"  {spark}" if spark else "")
-                color = "amber"
+        for index, (label, value) in enumerate(items):
+            x = 1 + index * gap
+            if label == "LOAD":
+                shown = "—" if value is None else f"{value:.2f}"
+                color = "mint"
+            elif label == "UPTIME":
+                shown = str(value or "—").removeprefix("up ")
+                color = "blue"
             else:
-                pct = int(value or 0)
-                color = "error" if pct > 90 else "amber" if pct > 70 else "mint"
-                fill = max(0, min(8, pct * 8 // 100))
-                bar = ("#" * fill + "." * (8 - fill)) if self.ascii else ("█" * fill + "░" * (8 - fill))
-                shown = f"{shown:<4} {bar}"
+                shown = "—" if value is None else f"{value}%"
+                color = "error" if int(value or 0) > 90 else "amber" if int(value or 0) > 70 else "mint"
             self.put(2, x, label, "dim", bold=True)
-            self.put(2, x + len(label) + 1, shown, color, bold=True, width=max(12, gap - len(label) - 2))
-            x += gap
-        self.put(3, 1, ("-" if self.ascii else "─") * max(1, width - 2), "line")
+            self.put(2, x + len(label) + 1, shown, color, bold=True,
+                     width=max(8, gap - len(label) - 2))
+
+    def _summary(self, y: int, width: int) -> None:
+        self._box(y, 1, 6, width - 2, "SERVER & ACCOUNT STATUS", "blue")
+        self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
+        self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
+                 width=max(12, width - 15))
+        summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
+        by_key = {row.key: row for row in self.rows}
+        half = max(20, (width - 6) // 2)
+        for index, key in enumerate(summary_keys):
+            column, line = index % 2, index // 2
+            row = by_key.get(key)
+            if row is None:
+                continue
+            x = 3 + column * half
+            active = row.state in {"Active", "Service active"}
+            state = "ONLINE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
+            color = "ok" if active else "amber" if state == "CHECK" else "dim"
+            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "sessions" if key in {"vmess", "vless", "trojan"} else "online"
+            count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
+            self.put(y + 2 + line, x, "●" if not self.ascii else "*", color, bold=True)
+            self.put(y + 2 + line, x + 2, row.title.upper(), "text", bold=True,
+                     width=min(15, half // 3))
+            self.put(y + 2 + line, x + min(18, half // 2), f"{state:<7} {count} {noun}", color,
+                     width=max(12, half - min(20, half // 2)))
+
+    def _protocol_grid(self, top: int, width: int, *, compact: bool) -> None:
+        self.put(top, 1, "PROTOCOLS  /  ACCOUNT MANAGEMENT", "blue", bold=True)
+        card_columns = 2 if width >= 76 else 1
+        gap = 2 if card_columns == 2 else 0
+        card_width = max(18, (width - 2 - gap) // card_columns)
+        card_height = 1 if compact else 2
+        icons = {"ssh": ">_", "vmess": "<>" , "vless": "<>" , "trojan": "<>" ,
+                 "shadowsocks": "~", "dropbear": "*", "openvpn": "O", "udp": "#",
+                 "wireguard": "W", "slowdns": "~", "dnstt": "@", "tls": "*"}
+        short_number = {key: f"{index:02}" for index, key in enumerate(LEGACY_ORDER, 1)}
+        by_key = {row.key: row for row in self.rows}
+        for index, key in enumerate(PROTOCOL_ORDER):
+            row = by_key.get(key)
+            if row is None:
+                continue
+            line, column = divmod(index, card_columns)
+            x = 1 + column * (card_width + gap)
+            y = top + 1 + line * card_height
+            selected = not self.in_tools and index == self.selected
+            active = row.state in {"Active", "Service active"}
+            state = "ACTIVE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
+            count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
+            icon = icons.get(key, "*")
+            if compact:
+                text = f"[{short_number[key]}] {row.title:<14} {state:<7} {count}  {icon}"
+                edge = "╭" if not self.ascii else "["
+                end = "╮" if not self.ascii else "]"
+                content = (edge + " " + text[:max(1, card_width - 4)].ljust(max(1, card_width - 4)) + " " + end)
+                self.put(y, x, content, row.color if selected else ("ok" if active else "line"),
+                         bold=selected, reverse=selected, width=card_width)
+            else:
+                horizontal = "-" if self.ascii else "─"
+                left, right = ("+", "+") if self.ascii else ("╭", "╮")
+                self.put(y, x, left + horizontal * (card_width - 2) + right,
+                         row.color if selected else "line", bold=selected)
+                title = f" [{short_number[key]}] {row.title}"
+                self.put(y, x + 2, title, row.color, bold=True, reverse=selected,
+                         width=card_width - 5)
+                status = f"{'●' if not self.ascii else '*'} {state}  {count}"
+                self.put(y + 1, x + 2, status, "ok" if active else "amber" if state == "CHECK" else "dim",
+                         width=card_width - 5)
+                self.put(y + 1, x + card_width - 1, "│" if not self.ascii else "|", "line")
 
     def _protocol_list(self, top: int, height: int, width: int) -> None:
         self.put(top, 1, "PROTOCOLS", "blue", bold=True)
@@ -556,21 +619,19 @@ class Dashboard:
         tabs = (("1", "Accounts"), ("2", "Create"), ("3", "Trial"), ("4", "Service"))
         self.stdscr.erase()
         self._header(width)
+        self._metric_line(width)
         self._box(4, 1, height - 8, width - 2, f"{row.title.upper()}  /  OPTION {number:02}", row.color)
         self.put(5, 3, f"{row.group}   •   {row.engine}   •   {row.ports}", "dim", width=width - 6)
-        # Compact numbered cards replace the old manager screen while retaining
-        # the familiar dashboard visual language.
-        card_width = max(18, (width - 8) // 4)
+        card_width = max(14, (width - 8) // 4)
         for index, (digit, label) in enumerate(tabs):
             x = 3 + index * (card_width + 1)
-            text = f"[{digit}] {label}"
-            left, right, line, vertical = ("+", "+", "-", "|") if self.ascii else ("╭", "╮", "─", "│")
-            self.put(7, x, left + line * max(0, card_width - 2) + right, row.color, width=card_width)
-            self.put(8, x, f"{vertical} {text:<{card_width - 4}} {vertical}", row.color,
-                     bold=index == self.protocol_tab, reverse=index == self.protocol_tab, width=card_width)
-            self.put(9, x, ("+" + line * max(0, card_width - 2) + "+") if self.ascii
-                     else ("╰" + line * max(0, card_width - 2) + "╯"), row.color, width=card_width)
-        body_top = 12
+            selected = index == self.protocol_tab and self.protocol_subview == "main"
+            self._box(6, x, 3, card_width, f"[{digit}] {label.upper()}",
+                      row.color if selected else "line")
+            if selected:
+                self.put(7, x + 1, "ACTIVE VIEW", row.color, bold=True, reverse=True,
+                         width=card_width - 2)
+        body_top = 10
         body_bottom = height - 5
         accounts = self._protocol_accounts(key) if self.protocol_tab == 0 or self.protocol_subview == "account" else []
         if self.protocol_subview == "account":
@@ -586,10 +647,10 @@ class Dashboard:
             self.put(body_top + 6, 6, "Press the matching number or Enter to continue.", "mint", width=width - 12)
         else:
             self._draw_service_panel(row, width, body_top, body_bottom)
-        help_text = ("1 Accounts · 2 Create · 3 Trial · 4 Service · 0 Dashboard" if self.protocol_subview == "main"
-                     else "Select account number · 0 Protocol menu" if self.protocol_subview == "accounts"
-                     else "1 Details · 2 Renew · 3 Delete · 4 Edit · 0 Accounts" if self.protocol_subview == "account"
-                     else "1 Restart · 2 Start · 3 Stop · 0 Protocol menu")
+        help_text = ("[1] Accounts  [2] Create  [3] Trial  [4] Service  [0] Dashboard" if self.protocol_subview == "main"
+                     else "Enter account number to open  ·  [0] Protocol menu" if self.protocol_subview == "accounts"
+                     else "[1] Details  [2] Renew  [3] Delete  [4] Edit  [0] Accounts" if self.protocol_subview == "account"
+                     else "[1] Restart  [2] Start  [3] Stop  [0] Protocol menu")
         self.put(height - 2, 2, help_text, "dim", width=width - 4)
         prompt = f"Select option: {self.protocol_numeric}{' ' if self.ascii else '▌'}"
         hint = "Enter select · Esc back"
@@ -602,7 +663,19 @@ class Dashboard:
                            accounts: list[dict[str, object]] | None) -> None:
         box_height = max(6, bottom - top)
         self._box(top, 3, box_height, width - 6, f"{row.title.upper()}  /  ACCOUNTS", row.color)
-        self.put(top + 1, 5, "#   ACCOUNT                     CONNECTION      STATUS       VALID UNTIL", "blue", bold=True)
+        name_x = 11
+        connection_x = max(31, width * 45 // 100)
+        status_x = max(connection_x + 13, width * 63 // 100)
+        expiry_x = max(status_x + 11, width * 79 // 100)
+        self.put(top + 1, 5, "NO.", "dim", bold=True, width=5)
+        self.put(top + 1, name_x, "ACCOUNT", "blue", bold=True,
+                 width=max(12, connection_x - name_x - 2))
+        self.put(top + 1, connection_x, "CONNECTION", "blue", bold=True,
+                 width=max(10, status_x - connection_x - 2))
+        self.put(top + 1, status_x, "STATUS", "blue", bold=True,
+                 width=max(8, expiry_x - status_x - 2))
+        self.put(top + 1, expiry_x, "VALID UNTIL", "blue", bold=True,
+                 width=max(10, width - expiry_x - 7))
         self.put(top + 2, 4, "─" * (width - 8), "line")
         if accounts is None:
             self.put(top + 4, 6, "Account data is unavailable from the protocol manager.", "amber")
@@ -625,10 +698,14 @@ class Dashboard:
             status_color = "error" if status == "EXPIRED" else "ok" if status in {"ACTIVE", "RUNNING"} else "amber"
             selected = index == self.account_index
             self.put(y, 5, f"[{index + 1:02}]", row.color, bold=selected, reverse=selected, width=5)
-            self.put(y, 11, account.get("name", "—"), "text", bold=selected, width=max(12, width // 3 - 2))
-            self.put(y, width // 2, account.get("connection", "—"), "amber", width=14)
-            self.put(y, width // 2 + 15, status, status_color, width=11)
-            self.put(y, width - 23, account.get("expires", "—"), "dim", width=18)
+            self.put(y, name_x, account.get("name", "—"), "text", bold=selected,
+                     reverse=selected, width=max(12, connection_x - name_x - 2))
+            self.put(y, connection_x, account.get("connection", "—"), "amber",
+                     width=max(10, status_x - connection_x - 2))
+            self.put(y, status_x, status, status_color, bold=True,
+                     width=max(8, expiry_x - status_x - 2))
+            self.put(y, expiry_x, account.get("expires", "—"), "dim",
+                     width=max(10, width - expiry_x - 7))
         if len(accounts) > max_rows and bottom < self.stdscr.getmaxyx()[0] - 2:
             self.put(bottom, 6, f"Showing {self.account_scroll + 1}-{self.account_scroll + len(visible)} of {len(accounts)} · Up/Down to scroll",
                      "dim", width=width - 12)
@@ -639,16 +716,34 @@ class Dashboard:
         if selected is None:
             self.protocol_subview, self.account_name = "main", None
             return
-        box_height = max(7, bottom - top)
+        box_height = max(8, bottom - top)
         self._box(top, 3, box_height, width - 6,
                   f"ACCOUNT  /  {str(selected.get('name', '')).upper()}", row.color)
-        self.put(top + 2, 6, f"CONNECTION  {selected.get('connection', '—')}", "amber", bold=True)
+        self.put(top + 2, 6, "CONNECTION", "dim", bold=True)
+        self.put(top + 2, 20, selected.get("connection", "—"), "amber", bold=True,
+                 width=max(12, width // 2 - 22))
         status = str(selected.get("status", "—"))
-        self.put(top + 2, width // 2, f"STATUS  {status}", "error" if status == "EXPIRED" else "ok", bold=True)
-        self.put(top + 3, 6, f"VALID UNTIL  {selected.get('expires', '—')}", "text")
-        self.put(top + 4, 6, f"INFO  {selected.get('details', '')}", "dim", width=width - 12)
-        actions = "[1] Details  [2] Renew  [3] Delete  [4] Edit  [0] Back"
-        self.put(top + box_height - 2, 6, actions, row.color, bold=True, width=width - 12)
+        self.put(top + 2, width // 2, "STATUS", "dim", bold=True)
+        self.put(top + 2, width // 2 + 10, status,
+                 "error" if status == "EXPIRED" else "ok", bold=True,
+                 width=max(10, width // 2 - 18))
+        self.put(top + 3, 6, "VALID UNTIL", "dim", bold=True)
+        self.put(top + 3, 20, selected.get("expires", "—"), "text", width=24)
+        self.put(top + 4, 6, "ACCOUNT INFO", "dim", bold=True)
+        self.put(top + 4, 20, selected.get("details", "—"), "text", width=width - 26)
+        actions = (("1", "View details"), ("2", "Renew account"),
+                   ("3", "Delete account"), ("4", "Edit account"), ("0", "Back to list"))
+        columns = 2 if width >= 72 else 1
+        tile_width = max(20, (width - 14 - (columns - 1) * 2) // columns)
+        action_top = top + 5
+        for index, (digit, label) in enumerate(actions):
+            action_row, column = divmod(index, columns)
+            x = 6 + column * (tile_width + 2)
+            y = action_top + action_row
+            highlighted = digit == "3"
+            text = f"[{digit}]  {label}"
+            self.put(y, x, text, "error" if highlighted else row.color,
+                     bold=True, reverse=highlighted, width=tile_width)
 
     def _draw_service_panel(self, row: Row, width: int, top: int, bottom: int) -> None:
         self._box(top, 3, max(8, bottom - top), width - 6, f"{row.title.upper()}  /  SERVICE", row.color)
@@ -656,7 +751,14 @@ class Dashboard:
         self.put(top + 3, 6, f"ENGINE   {row.engine}", "text")
         self.put(top + 4, 6, f"PORTS    {row.ports}", "text", width=width - 12)
         self.put(top + 5, 6, row.detail, "dim", width=width - 12)
-        self.put(top + 7, 6, "[1] Restart   [2] Start   [3] Stop   [0] Back", row.color, bold=True)
+        actions = (("1", "Restart service"), ("2", "Start service"),
+                   ("3", "Stop service"), ("0", "Back to protocol"))
+        tile_width = max(20, (width - 14) // 2)
+        for index, (digit, label) in enumerate(actions):
+            action_row, column = divmod(index, 2)
+            x = 6 + column * (tile_width + 2)
+            self.put(top + 6 + action_row, x, f"[{digit}]  {label}", row.color,
+                     bold=True, width=tile_width)
 
     def _terminal_action(self, title: str, action) -> None:
         """Temporarily leave curses for secure prompts and manager detail cards."""
@@ -967,11 +1069,16 @@ class Dashboard:
             self.protocol_subview = "service"
 
     def _tools(self, y: int, width: int) -> None:
-        self.put(y, 1, "SETTINGS & TOOLS", "amber", bold=True)
-        columns = 2
-        card_width = max(20, (width - 4) // columns)
+        banner = " SETTINGS & TOOLS "
+        horizontal = "-" if self.ascii else "─"
+        left, right = ("+", "+") if self.ascii else ("╭", "╮")
+        rule = left + horizontal * max(1, (width - len(banner) - 4) // 2) + banner
+        rule += horizontal * max(1, width - len(rule) - 2) + right
+        self.put(y, 1, rule, "amber", bold=True, reverse=True, width=width - 2)
+        columns = 2 if width >= 64 else 1
+        card_width = max(20, (width - 2 - (columns - 1) * 2) // columns)
         for index, (number, label) in enumerate(TOOLS):
-            column, row = index % columns, index // columns
+            row, column = divmod(index, columns)
             x = 1 + column * (card_width + 2)
             card_y = y + 1 + row
             selected = self.in_tools and index == self.tool_selected
@@ -981,13 +1088,14 @@ class Dashboard:
             else:
                 left, right, line = "╭", "╮", "─"
             self.put(card_y, x, left + text + line * max(0, card_width - len(text) - 2) + right,
-                     "amber", bold=selected, reverse=selected, width=card_width)
+                     "amber" if selected or index == 0 else "line", bold=True,
+                     reverse=selected, width=card_width)
 
     def draw(self, force: bool = False) -> None:
         height, width = self.stdscr.getmaxyx()
-        if height < 24 or width < 80:
+        if height < 24 or width < 72:
             self.stdscr.erase()
-            self.put(0, 1, "Please enlarge the terminal (80x24 minimum)", "amber", bold=True)
+            self.put(0, 1, "Please enlarge the terminal (72x24 minimum)", "amber", bold=True)
             self.stdscr.refresh()
             return
         try:
@@ -1007,29 +1115,24 @@ class Dashboard:
         self.stdscr.erase()
         self._header(width)
         self._metric_line(width)
-        main_top = 4
-        tools_y = height - 4
-        main_bottom = tools_y - 1
-        main_height = max(2, main_bottom - main_top)
-        if width >= 100:
-            left_width = int(width * 0.54)
-            self._protocol_list(main_top, main_height, left_width)
-            row = next(item for item in self.rows if item.key == PROTOCOL_ORDER[self.selected])
-            self._detail(row, main_top, left_width + 1, main_height, width - left_width - 2)
-        else:
-            self._protocol_list(main_top, max(2, main_height - 3), width - 1)
-            row = next(item for item in self.rows if item.key == PROTOCOL_ORDER[self.selected])
-            self.put(main_bottom - 2, 2, f"Selected: {row.title}  |  {row.state}  |  {row.count}", row.color, width=width - 4)
-            self.put(main_bottom - 1, 2, row.detail, "dim", width=width - 4)
+        self._summary(4, width)
+        compact = height < 34
+        grid_top = 10
+        self._protocol_grid(grid_top, width, compact=compact)
+        rows_per_col = (len(PROTOCOL_ORDER) + 1) // 2
+        grid_bottom = grid_top + 1 + rows_per_col * (1 if compact else 2)
+        tools_y = grid_bottom + 1
         self._tools(tools_y, width)
+        footer_y = height - 3
+        self.put(footer_y, 1, ("-" if self.ascii else "─") * (width - 2), "line")
         prompt = f"Select option [0-15]: {self.numeric}{' ' if self.ascii else '▌'}"
         hint = "Up/Down move · Enter open · Esc back"
         hint_x = max(1, width - len(hint) - 2)
-        self.put(height - 1, 1, prompt, "mint", bold=True, width=max(16, hint_x - 3))
-        self.put(height - 1, hint_x, hint, "dim", width=len(hint))
-        if self.toast and time.monotonic() < self.toast_until:
+        self.put(height - 2, 1, prompt, "mint", bold=True, width=max(16, hint_x - 3))
+        self.put(height - 2, hint_x, hint, "dim", width=len(hint))
+        if self.toast and time.monotonic() < self.toast_until and tools_y + 3 < footer_y:
             color = "ok" if self.toast.startswith("OK") else "error"
-            self.put(tools_y - 1, 2, self.toast, color, bold=True, width=width - 4)
+            self.put(tools_y + 3, 2, self.toast, color, bold=True, width=width - 4)
         self.stdscr.refresh()
 
     def _confirm_quit(self) -> bool:
