@@ -91,7 +91,7 @@ def dashboard() -> None:
     import terminal_ui
     width = max(58, min(shutil.get_terminal_size((80, 24)).columns, 100))
     terminal_ui.heading("KEN-NET  •  SERVER MANAGEMENT PANEL")
-    terminal_ui.metric_cards([("CPU LOAD", cpu), ("MEMORY", ram), ("DISK / UPTIME", disk_uptime)], columns=3)
+    print(f"{terminal_ui.CYAN}{cpu}  {ram}  {disk_uptime}{terminal_ui.RESET}")
     print(f"{terminal_ui.CYAN}DOMAIN{terminal_ui.RESET}  {terminal_ui.GREEN}{domain}{terminal_ui.RESET}")
     totals = {key: sum(1 for rec in accounts.values() if rec.get("protocol") == key) for key in ("ssh", "vless", "vmess", "trojan", "shadowsocks")}
     wg_total = dnstt_total = wg_online = dnstt_ready = 0
@@ -119,22 +119,17 @@ def dashboard() -> None:
         xray_online = {key: services_manager.active_connections(key).get("active connections (not unique users)", 0) for key in ("vless", "vmess", "trojan")}
     except (ImportError, OSError, ValueError):
         xray_online = {key: 0 for key in ("vless", "vmess", "trojan")}
-    terminal_ui.heading("ACCOUNT OVERVIEW", terminal_ui.CYAN)
-    terminal_ui.metric_cards([
-        ("SSH", f"{live_ssh} online  /  {totals['ssh']} accounts"),
-        ("VMESS", f"{xray_online['vmess']} sessions  /  {totals['vmess']} accounts"),
-        ("VLESS", f"{xray_online['vless']} sessions  /  {totals['vless']} accounts"),
-        ("TROJAN", f"{xray_online['trojan']} sessions  /  {totals['trojan']} accounts"),
-        ("WIREGUARD", f"{wg_online} peers  /  {wg_total} accounts"),
-        ("DNSTT", f"{dnstt_ready} active  /  {dnstt_total} endpoints"),
-    ], columns=3)
+    print(f"{terminal_ui.GREEN}SSH {live_ssh}/{totals['ssh']}  VMESS {xray_online['vmess']}/{totals['vmess']}  "
+          f"VLESS {xray_online['vless']}/{totals['vless']}  TROJAN {xray_online['trojan']}/{totals['trojan']}{terminal_ui.RESET}")
+    print(f"{terminal_ui.GREEN}WIREGUARD {wg_online}/{wg_total} peers  DNSTT {dnstt_ready}/{dnstt_total} active endpoints{terminal_ui.RESET}")
     protocol_options = [("01", "SSH"), ("02", "VMESS"), ("03", "VLESS"), ("04", "TROJAN"),
                         ("05", "SHADOWSOCKS"), ("06", "DROPBEAR"), ("07", "OPENVPN"),
                         ("08", "UDP CUSTOM"), ("09", "WIREGUARD"), ("10", "SLOWDNS"),
                         ("11", "DNSTT"), ("12", "TLS / DOMAIN")]
-    terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options, columns=2)
+    terminal_ui.option_cards("PROTOCOLS  •  ACCOUNT MANAGEMENT", protocol_options, columns=3, clear=False, compact=True)
     terminal_ui.option_cards("SETTINGS & TOOLS", [("13", "System settings"), ("14", "Protocol status"),
-                           ("15", "Services / ports"), ("0", "Exit")], columns=2, color=terminal_ui.YELLOW)
+                           ("15", "Services / ports"), ("0", "Exit")], columns=2,
+                           color=terminal_ui.YELLOW, clear=False, compact=True)
     print("\n" + "─ " * (width // 2))
     print("Select option [0-15]: ", end="", flush=True)
 
@@ -317,6 +312,8 @@ def main() -> int:
         print("This program is intended for Ubuntu/Linux servers.")
         return 2
     while True:
+        import terminal_ui
+        terminal_ui.clear_screen()
         dashboard()
         choice = input().strip()
         if choice == "0":

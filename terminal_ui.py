@@ -15,23 +15,44 @@ MAGENTA = "\033[95m"
 RESET = "\033[0m"
 
 
+def clear_screen() -> None:
+    """Clear an interactive terminal before drawing the current menu view."""
+    import sys
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+
 def heading(title: str, color: str = CYAN) -> None:
-    width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
-    print(f"\n{color}╭{'─' * (width - 2)}╮")
+    width = max(36, min(shutil.get_terminal_size((80, 24)).columns, 80))
+    print(f"{color}╭{'─' * (width - 2)}╮")
     visible_title = title if len(title) <= width - 4 else title[:width - 7] + "..."
     print(f"│ {visible_title.center(width - 4)} │")
     print(f"╰{'─' * (width - 2)}╯{RESET}")
 
 
-def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2, color: str = BLUE) -> None:
+def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2,
+                 color: str = BLUE, clear: bool = True, compact: bool = False) -> None:
+    if clear:
+        clear_screen()
     heading(title, color)
-    terminal_width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
-    gap = "   "
-    columns = max(1, min(columns, max(1, (terminal_width + len(gap)) // 34)))
-    cell_width = max(30, (terminal_width - len(gap) * (columns - 1)) // columns)
+    terminal_width = max(36, min(shutil.get_terminal_size((80, 24)).columns, 80))
+    gap = "  "
+    columns = max(1, min(columns, max(1, (terminal_width + len(gap)) // 25)))
+    cell_width = max(24, (terminal_width - len(gap) * (columns - 1)) // columns)
     inner_width = cell_width - 4
     groups = [options[index:index + columns] for index in range(0, len(options), columns)]
     for group in groups:
+        if compact:
+            parts = []
+            for key, label in group:
+                content = f" [{key}] {label} "
+                available = cell_width - 2
+                if len(content) > available:
+                    content = content[:available - 1] + " "
+                parts.append("╭" + content + "─" * (available - len(content)) + "╮")
+            print(color + gap.join(parts) + RESET)
+            continue
         cards: list[list[str]] = []
         for key, label in group:
             marker = f"[{key}]"
@@ -58,7 +79,7 @@ def metric_cards(items: list[tuple[str, object]], *, columns: int = 4, color: st
     """Render compact dashboard metrics in evenly sized terminal cards."""
     if not items:
         return
-    width = max(40, min(shutil.get_terminal_size((80, 24)).columns, 100))
+    width = max(36, min(shutil.get_terminal_size((80, 24)).columns, 80))
     gap = "  "
     columns = max(1, min(columns, len(items), max(1, (width + len(gap)) // 20)))
     cell_width = max(18, (width - len(gap) * (columns - 1)) // columns)
