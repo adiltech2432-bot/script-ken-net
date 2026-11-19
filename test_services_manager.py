@@ -114,10 +114,10 @@ bob 122 sshd: bob@notty
         ])
         self.assertTrue(all(kwargs.get("check") is True for _command, kwargs in calls[1:3] + calls[-1:]))
 
-    def test_ssh_password_prompt_rejects_short_password_before_confirmation(self):
-        with patch.object(services.getpass, "getpass", side_effect=["short", "correct-horse", "correct-horse"]) as prompt:
-            self.assertEqual(services._prompt_ssh_password(), "correct-horse")
-        self.assertEqual(prompt.call_count, 3)
+    def test_ssh_password_prompt_accepts_four_characters_without_confirmation(self):
+        with patch.object(services.getpass, "getpass", return_value="1234") as prompt:
+            self.assertEqual(services._prompt_ssh_password(), "1234")
+        prompt.assert_called_once_with("Password (input hidden): ")
 
     def test_xray_installer_validates_and_starts_service(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(services, "XRAY_CONFIG", __import__("pathlib").Path(temp) / "config.json"), \
