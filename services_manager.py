@@ -482,9 +482,17 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
     squid = subprocess.run(["systemctl", "is-active", "--quiet", "squid.service"], check=False).returncode == 0
     badvpn = [str(port) for unit, port in (("badvpn1.service", 7100), ("badvpn2.service", 7200), ("badvpn3.service", 7300))
               if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode == 0]
+    shared_login_services = ["OpenSSH"] if ssh_service else []
+    if dropbear:
+        shared_login_services.append("Dropbear")
+    if gateway_ready and websocket_ready:
+        shared_login_services.extend(["SSH WebSocket", "SSH over TLS/WebSocket", "HTTP Custom WebSocket"])
+    if udp_ready:
+        shared_login_services.append("UDP Custom")
     return [
         ("Username", username),
         ("Password", password if password is not None else "Not retrievable after creation; renew/reset it"),
+        ("Shared SSH account", ", ".join(shared_login_services) or "No compatible SSH transport is active"),
         ("IP", server_ip),
         ("Host", domain),
         ("Host SlowDNS", "Not included; DNSTT is a separate protocol"),
@@ -497,15 +505,16 @@ def _ssh_account_fields(username: str, record: dict, password: str | None = None
         ("Port SSH WS SSL", "443/TCP" if gateway_ready and websocket_ready else "Not configured"),
         ("Port SSH WS / HTTP Custom proxy", "80, 8080/TCP" if gateway_ready and websocket_ready else "Not configured"),
         ("Port SSL/TLS", "443/TCP" if gateway_ready else "Not configured"),
-        ("Port OpenVPN WS SSL", "443/TCP" if ovpn_tcp and gateway_ready and websocket_ready else "Not configured"),
-        ("Port OpenVPN SSL", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
-        ("Port OpenVPN TCP", "443, 1194/TCP" if ovpn_tcp else "Not installed"),
-        ("Port OpenVPN UDP", "2200/UDP" if ovpn_udp else "Not installed"),
+        ("OpenVPN WebSocket (separate certificate account)", "443/TCP" if ovpn_tcp and gateway_ready and websocket_ready else "Not configured"),
+        ("OpenVPN TLS (separate certificate account)", "443/TCP" if ovpn_tcp and gateway_ready else "Not configured"),
+        ("OpenVPN TCP (separate certificate account)", "443, 1194/TCP" if ovpn_tcp else "Not installed"),
+        ("OpenVPN UDP (separate certificate account)", "2200/UDP" if ovpn_udp else "Not installed"),
         ("Proxy Squid", "3128/TCP" if squid else "Optional; not installed"),
         ("BadVPN UDP", ", ".join(badvpn) if badvpn else "Optional; not installed"),
         ("DNSTT endpoint public keys", dns_public_key),
         ("UDP Custom", f"{domain}:1-65535@{username}:{password or '<password not retrievable>'}" if udp_ready else "Not installed"),
         ("SSH WebSocket", f"{domain}:80@{username}:{password or '<password not retrievable>'}" if gateway_ready and websocket_ready else "Not configured"),
+        ("SSH TLS/SSL endpoint", f"{domain}:443@{username}:{password or '<password not retrievable>'}" if gateway_ready and websocket_ready else "Not configured"),
         ("Payload WSS", f"GET /ssh-ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]" if gateway_ready and websocket_ready else "Not configured"),
         ("Allowed IPs", "Unlimited" if not int(record.get("max_ips", 0)) else str(record.get("max_ips"))),
         ("Expired", expiry),
@@ -1021,7 +1030,7 @@ def show_account_details(protocol: str, username: str) -> None:
         if protocol == "ssh":
             terminal_ui.detail_card(
                 "SSH OVPN ACCOUNT", _ssh_account_fields(username, record),
-                note="SSH login uses the OpenSSH port shown above. Optional legacy services marked optional are not required for this account.",
+                note="This creates one Linux username/password. The same credentials work automatically on each active SSH-compatible service listed above; expiry or deletion revokes them together. OpenVPN, DNSTT, and Xray are separate account systems.",
             )
             return
         if protocol == "udp":
@@ -1057,15 +1066,19 @@ def show_created_account(protocol: str, username: str, credential: str, days: in
                     {"expires_at": expires, "trial": trial,
                      "max_ips": state().get("accounts", {}).get(username, {}).get("max_ips", 0)},
                     password=credential),
-                note="SSH login uses the OpenSSH port shown above. Optional legacy services marked optional are not required for this account.",
+                note="One Linux account is shared by active SSH-compatible transports (OpenSSH, Dropbear, SSH WebSocket/TLS, and UDP Custom). OpenVPN, DNSTT, and Xray require their own account systems.",
             )
             copy_items = [("OpenSSH command", f"ssh {username}@{ssh_host} -p 22")]
             try:
                 import gateway_manager
-                if gateway_manager.is_ready()[0]:
+                if gateway_manager.is_ready()[0] and gateway_manager.websocket_bridge_ready()[0]:
                     copy_items.append(("SSH WebSocket endpoint", f"{ssh_host}:80@{username}:{credential}"))
+                    copy_items.append(("SSH TLS/SSL endpoint (TCP/443)", f"{ssh_host}:443@{username}:{credential}"))
             except (ImportError, OSError, ValueError):
                 pass
+            if subprocess.run(["systemctl", "is-active", "--quiet", "kennet-dropbear.service"], check=False).returncode == 0:
+                copy_items.append(("Dropbear endpoint (TCP/109)", f"{ssh_host}:109@{username}:{credential}"))
+                copy_items.append(("Dropbear endpoint (TCP/143)", f"{ssh_host}:143@{username}:{credential}"))
             try:
                 import udp_custom_manager
                 if udp_custom_manager.ready()[0]:
