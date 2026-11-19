@@ -1,6 +1,6 @@
 # Ken-net Terminal Manager
 
-An editable English terminal manager for Ubuntu 24.04. The home screen is a colored server dashboard with system metrics, domain, account/session counts, and separate card menus for protocols and settings. Account creation immediately displays protocol-specific connection details.
+An editable English terminal manager for Ubuntu 24.04. The default home screen is a keyboard-driven colored dashboard with live system metrics, domain, protocol status, listener ports, and account counts. The presentation layer opens the existing protocol managers, so account and service operations continue to use the same backend logic. Protocol numbers retain the original menu IDs even though the dashboard groups cards by service type.
 
 The **System settings** cards include running-service status, the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing, VPS speed test, WebSocket capability status, and confirmed VPS reboot.
 
@@ -38,7 +38,18 @@ curl -fsSL https://raw.githubusercontent.com/adiltech2432-bot/script-ken-net/mai
 sudo kennet-panel
 ```
 
-The installer runs the local test suite and copies the manager to `/opt/kennet-panel`.
+The installer runs the local test suite, backs up the previous `panel.py` when it changes, and copies the manager to `/opt/kennet-panel`. The dashboard uses Python's standard-library `curses`; no third-party TUI package is required.
+
+### Dashboard controls
+
+- **Up/Down** or **J/K:** move through protocol cards.
+- **Enter** or **A:** open the selected existing protocol manager.
+- **Tab:** move focus to Settings & Tools; **Left/Right** selects a tool.
+- **1–15:** open the original numbered protocol/tool option directly; **0** opens the exit action.
+- **Esc/Backspace:** leave tool focus or clear the current numeric choice; **Q** asks before exiting.
+- The view refreshes every two seconds and responds to terminal resize. It requires at least 80×24; smaller terminals show a resize prompt. Missing listener/account values display `—` instead of a guessed value.
+
+Run `sudo kennet-panel --plain` for a no-color ASCII dashboard or `sudo kennet-panel --legacy` for the original menu. Non-interactive sessions and `TERM=dumb` automatically use the plain dashboard.
 
 ## Domains and ports
 

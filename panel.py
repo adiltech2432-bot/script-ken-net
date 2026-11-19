@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import shutil
 import subprocess
@@ -308,7 +309,7 @@ def manage_protocol(p: Protocol) -> None:
     run_helper(helper)
 
 
-def main() -> int:
+def legacy_main() -> int:
     if not sys.platform.startswith("linux"):
         print("This program is intended for Ubuntu/Linux servers.")
         return 2
@@ -333,6 +334,21 @@ def main() -> int:
             manage_protocol(p)
         else:
             print("Invalid selection.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Start the redesigned dashboard, with an explicit route to the original menu."""
+    parser = argparse.ArgumentParser(description="KEN-NET server management panel")
+    parser.add_argument("--plain", action="store_true", help="use the dashboard without color or Unicode art")
+    parser.add_argument("--legacy", action="store_true", help="launch the original menu unchanged")
+    args = parser.parse_args(argv)
+    if args.legacy:
+        return legacy_main()
+    if not sys.platform.startswith("linux"):
+        print("This program is intended for Ubuntu/Linux servers. Use --legacy for the original menu.")
+        return 2
+    import dashboard_tui
+    return dashboard_tui.run(force_plain=args.plain)
 
 
 if __name__ == "__main__":
