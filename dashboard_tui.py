@@ -312,6 +312,8 @@ class Dashboard:
         self.account_index = 0
         self.account_scroll = 0
         self.account_name: str | None = None
+        self.account_action_index = 0
+        self.service_action_index = 0
         self.protocol_numeric = ""
         self.numeric = ""
         self.toast = ""
@@ -451,7 +453,9 @@ class Dashboard:
                  "wireguard": "W", "slowdns": "~", "dnstt": "@", "tls": "*"}
         short_number = {key: f"{index:02}" for index, key in enumerate(LEGACY_ORDER, 1)}
         by_key = {row.key: row for row in self.rows}
-        for index, key in enumerate(PROTOCOL_ORDER):
+        # Keep the visual order identical to the public numeric menu. Grouped
+        # service order is still used by the collectors and status model.
+        for index, key in enumerate(LEGACY_ORDER):
             row = by_key.get(key)
             if row is None:
                 continue
@@ -464,12 +468,9 @@ class Dashboard:
             count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
             icon = icons.get(key, "*")
             if compact:
-                text = f"[{short_number[key]}] {row.title}   {icon}   {state} · {count}"
-                self.put(y, x, "╭" if not self.ascii else "+", "violet" if selected else "blue", bold=True)
-                self.put(y, x + 1, text, row.color if selected else "text",
-                         bold=True, reverse=selected, width=card_width - 3)
-                self.put(y, x + card_width - 1, "╮" if not self.ascii else "+",
-                         "violet" if selected else "blue", bold=True)
+                text = f"[{short_number[key]}] {row.title}  {icon}  {state} · {count}"
+                self.put(y, x, text, row.color if selected else "text",
+                         bold=True, reverse=selected, width=card_width)
             else:
                 self._box(y, x, 3, card_width, f"[{short_number[key]}] {row.title}  {icon}",
                           row.color if selected else "blue")
@@ -482,13 +483,13 @@ class Dashboard:
         self.put(top, 12, "ACCOUNT MANAGEMENT", "dim")
         columns = 2 if width >= 48 else 1
         card_width = max(18, (width - (columns - 1) * 2) // columns)
-        card_height = 2
-        rows_per_column = (len(PROTOCOL_ORDER) + columns - 1) // columns
-        selected_key = PROTOCOL_ORDER[self.selected]
+        card_height = 3
+        rows_per_column = (len(LEGACY_ORDER) + columns - 1) // columns
+        selected_key = LEGACY_ORDER[self.selected]
         short_number = {key: f"{index:02}" for index, key in enumerate(LEGACY_ORDER, 1)}
-        for index, key in enumerate(PROTOCOL_ORDER):
+        for index, key in enumerate(LEGACY_ORDER):
             row = next(item for item in self.rows if item.key == key)
-            column, card_row = divmod(index, rows_per_column)
+            card_row, column = divmod(index, columns)
             x = 1 + column * (card_width + 2)
             y = top + 1 + card_row * card_height
             selected = not self.in_tools and key == selected_key
@@ -512,7 +513,9 @@ class Dashboard:
         else:
             horizontal, vertical, left, right = "─", "│", "╭", "╮"
             dot = "●"
-        border = row.color if selected else "line"
+        # Keep card outlines consistent; selected cards receive a brighter
+        # accent while category color remains visible in the card title.
+        border = "violet" if selected else "blue"
         title = f" {number}  {row.title} "
         top_line = left + horizontal * (width - 2) + right
         self.put(y, x, top_line, border, bold=selected)
@@ -527,6 +530,8 @@ class Dashboard:
         self.put(y + 1, x + 2, detail, "ok" if active else "amber" if state == "CHECK" else "dim",
                  bold=selected, reverse=selected, width=max(1, width - 4))
         self.put(y + 1, x + width - 1, vertical, border)
+        self.put(y + 2, x, left + horizontal * (width - 2) + right, border,
+                 bold=selected)
 
     def _detail(self, row: Row, y: int, x: int, height: int, width: int) -> None:
         self._box(y, x, height, width, row.title.upper(), row.color)
@@ -641,10 +646,10 @@ class Dashboard:
             self.put(body_top + 6, 6, "Press the matching number or Enter to continue.", "mint", width=width - 12)
         else:
             self._draw_service_panel(row, width, body_top, body_bottom)
-        help_text = ("[1] Accounts  [2] Create  [3] Trial  [4] Service  [0] Dashboard" if self.protocol_subview == "main"
-                     else "Enter account number to open  ·  [0] Protocol menu" if self.protocol_subview == "accounts"
-                     else "[1] Details  [2] Renew  [3] Delete  [4] Edit  [0] Accounts" if self.protocol_subview == "account"
-                     else "[1] Restart  [2] Start  [3] Stop  [0] Protocol menu")
+        help_text = ("←/→ tabs  ·  Enter open  ·  1-4 direct select  ·  0 dashboard" if self.protocol_subview == "main"
+                     else "↑/↓ select account  ·  Enter actions  ·  number direct select  ·  0 menu" if self.protocol_subview == "accounts"
+                     else "↑/↓←/→ choose action  ·  Enter open  ·  1-4 direct select  ·  0 accounts" if self.protocol_subview == "account"
+                     else "↑/↓←/→ choose  ·  Enter run  ·  1-3 direct select  ·  0 menu")
         self.put(height - 2, 2, help_text, "dim", width=width - 4)
         prompt = f"Select option: {self.protocol_numeric}{' ' if self.ascii else '▌'}"
         hint = "Enter select · Esc back"
@@ -730,14 +735,21 @@ class Dashboard:
         columns = 2 if width >= 72 else 1
         tile_width = max(20, (width - 14 - (columns - 1) * 2) // columns)
         action_top = top + 5
+        compact = bottom - action_top < 11
         for index, (digit, label) in enumerate(actions):
             action_row, column = divmod(index, columns)
             x = 6 + column * (tile_width + 2)
-            y = action_top + action_row
-            highlighted = digit == "3"
-            text = f"[{digit}]  {label}"
-            self.put(y, x, text, "error" if highlighted else row.color,
-                     bold=True, reverse=highlighted, width=tile_width)
+            y = action_top + action_row * (1 if compact else 3)
+            is_selected = index == self.account_action_index
+            color = "amber" if is_selected else "error" if digit == "3" else row.color
+            if compact:
+                self.put(y, x, f"[{digit}]  {label}", color,
+                         bold=True, reverse=is_selected, width=tile_width)
+            else:
+                self._box(y, x, 3, tile_width, f"[{digit}]  {label}", color)
+                self.put(y + 1, x + 2, "ENTER TO OPEN" if is_selected else "SELECT",
+                         "mint" if is_selected else "dim", bold=is_selected,
+                         width=tile_width - 4)
 
     def _draw_service_panel(self, row: Row, width: int, top: int, bottom: int) -> None:
         self._box(top, 3, max(8, bottom - top), width - 6, f"{row.title.upper()}  /  SERVICE", row.color)
@@ -748,11 +760,21 @@ class Dashboard:
         actions = (("1", "Restart service"), ("2", "Start service"),
                    ("3", "Stop service"), ("0", "Back to protocol"))
         tile_width = max(20, (width - 14) // 2)
+        compact = bottom - (top + 6) < 8
         for index, (digit, label) in enumerate(actions):
             action_row, column = divmod(index, 2)
             x = 6 + column * (tile_width + 2)
-            self.put(top + 6 + action_row, x, f"[{digit}]  {label}", row.color,
-                     bold=True, width=tile_width)
+            y = top + 6 + action_row * (1 if compact else 3)
+            is_selected = index == self.service_action_index
+            color = "amber" if is_selected else "error" if digit == "3" else row.color
+            if compact:
+                self.put(y, x, f"[{digit}]  {label}", color,
+                         bold=True, reverse=is_selected, width=tile_width)
+            else:
+                self._box(y, x, 3, tile_width, f"[{digit}]  {label}", color)
+                self.put(y + 1, x + 2, "ENTER TO RUN" if is_selected else "SELECT",
+                         "mint" if is_selected else "dim", bold=is_selected,
+                         width=tile_width - 4)
 
     def _terminal_action(self, title: str, action) -> None:
         """Temporarily leave curses for secure prompts and manager detail cards."""
@@ -995,6 +1017,7 @@ class Dashboard:
             self.account_index = 0
         self.account_name = str(accounts[self.account_index].get("name", ""))
         self.protocol_subview = "account"
+        self.account_action_index = 0
         self.protocol_numeric = ""
 
     def _protocol_number_action(self) -> None:
@@ -1110,11 +1133,16 @@ class Dashboard:
         self._header(width)
         self._metric_line(width)
         self._summary(4, width)
-        compact = height < 40
+        # Six double-column cards need 18 rows; reserve two rows for tools and
+        # three for the footer before switching to the condensed presentation.
+        compact = height < 36
         grid_top = 10
         self._protocol_grid(grid_top, width, compact=compact)
         rows_per_col = (len(PROTOCOL_ORDER) + 1) // 2
-        grid_bottom = grid_top + 1 + rows_per_col * (1 if compact else 2)
+        # Expanded cards occupy three rows (top border, status, bottom border).
+        # Compact cards occupy one. The previous two-row estimate caused the
+        # tools banner to overwrite the final protocol cards.
+        grid_bottom = grid_top + 1 + rows_per_col * (1 if compact else 3)
         tools_y = grid_bottom + 1
         self._tools(tools_y, width)
         footer_y = height - 3
@@ -1198,7 +1226,7 @@ class Dashboard:
                 return self._confirm_quit()
             self._open_backend(number)
         else:
-            self.protocol_view_key = PROTOCOL_ORDER[self.selected]
+            self.protocol_view_key = LEGACY_ORDER[self.selected]
             self.protocol_tab = 0
             self.last_draw = None
         return False
@@ -1218,7 +1246,7 @@ class Dashboard:
             return False
         if 1 <= value <= 12:
             protocol_key = _legacy_protocol_key(value)
-            self.selected = PROTOCOL_ORDER.index(protocol_key)
+            self.selected = LEGACY_ORDER.index(protocol_key)
             self.in_tools = False
             self.protocol_view_key = protocol_key
             self.protocol_tab = 0
@@ -1234,6 +1262,9 @@ class Dashboard:
     def run(self) -> int:
         self.draw(force=True)
         while True:
+            # Re-read dimensions before spatial navigation so the layout
+            # remains correct after the terminal is resized.
+            _height, width = self.stdscr.getmaxyx()
             try:
                 key = self.stdscr.get_wch()
             except curses.error:
@@ -1243,18 +1274,33 @@ class Dashboard:
                 key_name = self.protocol_view_key
                 if key == curses.KEY_RESIZE:
                     self.stdscr.clearok(True)
-                elif key in {curses.KEY_LEFT, "h"} and self.protocol_subview == "main":
-                    self.protocol_tab = (self.protocol_tab - 1) % 4
-                elif key in {curses.KEY_RIGHT, "l"} and self.protocol_subview == "main":
-                    self.protocol_tab = (self.protocol_tab + 1) % 4
+                elif key in {curses.KEY_LEFT, "h", curses.KEY_RIGHT, "l"}:
+                    direction = -1 if key in {curses.KEY_LEFT, "h"} else 1
+                    if self.protocol_subview == "main":
+                        self.protocol_tab = (self.protocol_tab + direction) % 4
+                    elif self.protocol_subview == "account":
+                        self.account_action_index = max(0, min(4, self.account_action_index + direction))
+                    elif self.protocol_subview == "service":
+                        self.service_action_index = max(0, min(3, self.service_action_index + direction))
+                elif key in {"\t", curses.KEY_BTAB} and self.protocol_subview == "main":
+                    direction = -1 if key == curses.KEY_BTAB else 1
+                    self.protocol_tab = (self.protocol_tab + direction) % 4
                 elif key in {curses.KEY_UP, "k"} and self.protocol_subview in {"accounts", "account"}:
                     accounts = self._protocol_accounts(key_name) or []
                     if accounts and self.protocol_subview == "accounts":
                         self.account_index = (self.account_index - 1) % len(accounts)
+                    elif self.protocol_subview == "account":
+                        self.account_action_index = max(0, self.account_action_index - (2 if width >= 72 else 1))
+                elif key in {curses.KEY_UP, "k"} and self.protocol_subview == "service":
+                    self.service_action_index = max(0, self.service_action_index - 2)
                 elif key in {curses.KEY_DOWN, "j"} and self.protocol_subview in {"accounts", "account"}:
                     accounts = self._protocol_accounts(key_name) or []
                     if accounts and self.protocol_subview == "accounts":
                         self.account_index = (self.account_index + 1) % len(accounts)
+                    elif self.protocol_subview == "account":
+                        self.account_action_index = min(4, self.account_action_index + (2 if width >= 72 else 1))
+                elif key in {curses.KEY_DOWN, "j"} and self.protocol_subview == "service":
+                    self.service_action_index = min(3, self.service_action_index + 2)
                 elif key in {"\n", "\r", curses.KEY_ENTER}:
                     if self.protocol_numeric:
                         self._protocol_number_action()
@@ -1267,13 +1313,18 @@ class Dashboard:
                             self.protocol_subview = "service"
                     elif self.protocol_subview == "accounts":
                         self._select_account(self._protocol_accounts(key_name) or [])
+                    elif self.protocol_subview == "account":
+                        self.protocol_numeric = ("1", "2", "3", "4", "0")[self.account_action_index]
+                        self._protocol_number_action()
                     elif self.protocol_subview == "service":
-                        self._protocol_operation(key_name, 3, action=1)
+                        self.protocol_numeric = ("1", "2", "3", "0")[self.service_action_index]
+                        self._protocol_number_action()
                 elif key in {"\x1b", "\x08", "\x7f", curses.KEY_BACKSPACE, "q", "Q"}:
                     if self.protocol_numeric:
                         self.protocol_numeric = self.protocol_numeric[:-1]
                     elif self.protocol_subview == "account":
                         self.protocol_subview, self.account_name = "accounts", None
+                        self.account_action_index = 0
                     elif self.protocol_subview != "main":
                         self.protocol_subview = "main"
                     else:
@@ -1287,30 +1338,50 @@ class Dashboard:
             if key == curses.KEY_RESIZE:
                 self.stdscr.clearok(True)
                 self.last_draw = None
-            elif key in {curses.KEY_UP, "k"}:
+            elif key in {curses.KEY_UP, "k", curses.KEY_DOWN, "j",
+                         curses.KEY_LEFT, "h", curses.KEY_RIGHT, "l"}:
+                direction = (-1 if key in {curses.KEY_UP, "k"} else
+                             1 if key in {curses.KEY_DOWN, "j"} else
+                             -1 if key in {curses.KEY_LEFT, "h"} else 1)
+                horizontal = key in {curses.KEY_LEFT, "h", curses.KEY_RIGHT, "l"}
+                columns = 2 if width >= 76 else 1
                 if self.in_tools:
-                    self.in_tools = False
+                    tool_columns = 2 if width >= 64 else 1
+                    step = direction if horizontal else direction * tool_columns
+                    target = self.tool_selected + step
+                    if 0 <= target < len(TOOLS):
+                        self.tool_selected = target
+                    elif not horizontal:
+                        # Moving up from the tools returns to the protocol
+                        # cards; moving down at the last row stays in tools.
+                        if direction < 0:
+                            self.in_tools = False
+                            self.selected = len(LEGACY_ORDER) - 1
                 else:
-                    self.selected = (self.selected - 1) % len(PROTOCOL_ORDER)
-                self.last_draw = None
-            elif key in {curses.KEY_DOWN, "j"}:
-                if self.in_tools:
-                    self.in_tools = False
-                else:
-                    self.selected = (self.selected + 1) % len(PROTOCOL_ORDER)
+                    if horizontal and columns == 2:
+                        col = self.selected % columns
+                        target_col = col + direction
+                        if 0 <= target_col < columns:
+                            self.selected = (self.selected // columns) * columns + target_col
+                    elif horizontal:
+                        # One-column layout: left/right have no adjacent card.
+                        pass
+                    else:
+                        target = self.selected + direction * columns
+                        if 0 <= target < len(LEGACY_ORDER):
+                            self.selected = target
+                        elif direction > 0:
+                            self.in_tools = True
+                            self.tool_selected = 0
                 self.last_draw = None
             elif key == curses.KEY_HOME:
                 self.selected, self.in_tools = 0, False
                 self.last_draw = None
             elif key == curses.KEY_END:
-                self.selected, self.in_tools = len(PROTOCOL_ORDER) - 1, False
+                self.selected, self.in_tools = len(LEGACY_ORDER) - 1, False
                 self.last_draw = None
             elif key in {"\t", curses.KEY_BTAB}:
                 self.in_tools = not self.in_tools
-                self.last_draw = None
-            elif self.in_tools and key in {curses.KEY_LEFT, curses.KEY_RIGHT}:
-                direction = -1 if key == curses.KEY_LEFT else 1
-                self.tool_selected = (self.tool_selected + direction) % len(TOOLS)
                 self.last_draw = None
             elif key in {"\n", "\r", curses.KEY_ENTER}:
                 if self.numeric:
@@ -1330,7 +1401,7 @@ class Dashboard:
                     return 0
                 self.last_draw = None
             elif key in {"a", "A"} and not self.in_tools:
-                self._open_backend(PROTOCOL_ORDER[self.selected])
+                self._open_backend(LEGACY_ORDER[self.selected])
             elif isinstance(key, str) and key.isdigit() and len(self.numeric) < 2:
                 self.numeric += key
                 self.last_draw = None
