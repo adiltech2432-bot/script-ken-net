@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import dashboard_tui
 
 
 class DashboardDataTests(unittest.TestCase):
+    def test_release_version_is_available_for_dashboard_and_installer(self):
+        expected = Path(dashboard_tui.__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
+        self.assertTrue(expected)
+        self.assertEqual(dashboard_tui._release_version(), expected)
+
     def test_protocol_groups_cover_each_menu_number_once(self):
         keys = [key for _group, _color, group_keys in dashboard_tui.GROUPS for key in group_keys]
         self.assertEqual(keys, list(dashboard_tui.PROTOCOL_ORDER))

@@ -35,10 +35,11 @@ The **Services / Ports** screen describes the implemented public ports and the l
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adiltech2432-bot/script-ken-net/main/install-remote.sh | sudo bash
+sudo kennet-panel --version
 sudo kennet-panel
 ```
 
-The installer runs the local test suite, backs up the previous `panel.py` when it changes, and copies the manager to `/opt/kennet-panel`. The dashboard uses Python's standard-library `curses`; no third-party TUI package is required.
+The installer runs the local test suite, backs up the previous `panel.py` when it changes, and copies the manager to `/opt/kennet-panel`. The installer prints the release version and short commit ID; `sudo kennet-panel --version` displays the installed build again. The dashboard uses Python's standard-library `curses`; no third-party TUI package is required.
 
 ### Dashboard controls
 

@@ -15,7 +15,7 @@ fi
 if [[ -z "${BUILD_ID}" ]]; then
   BUILD_ID="local-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
-REQUIRED=(panel.py dashboard_tui.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py udp_custom_manager.py gateway_manager.py websocket_tunnel.py openvpn_manager.py ssh_ip_limit.py)
+REQUIRED=(VERSION panel.py dashboard_tui.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py udp_custom_manager.py gateway_manager.py websocket_tunnel.py openvpn_manager.py ssh_ip_limit.py)
 
 for file in "${REQUIRED[@]}"; do
   if [[ ! -f "${SOURCE_DIR}/${file}" ]]; then
@@ -48,7 +48,8 @@ fi
 for file in "${REQUIRED[@]}"; do
   install -o root -g root -m 0644 "${SOURCE_DIR}/${file}" "${DEST_DIR}/${file}"
 done
-printf '%s\n' "${BUILD_ID}" > "${DEST_DIR}/BUILD"
+RELEASE_VERSION="$(tr -d '[:space:]' < "${SOURCE_DIR}/VERSION")"
+printf '%s (%s)\n' "${RELEASE_VERSION}" "${BUILD_ID:0:12}" > "${DEST_DIR}/BUILD"
 chown root:root "${DEST_DIR}/BUILD"
 chmod 0644 "${DEST_DIR}/BUILD"
 
@@ -127,7 +128,7 @@ EOF
 chown root:root /usr/local/bin/kennet-panel
 chmod 0750 /usr/local/bin/kennet-panel
 
-echo "Installed KEN-NET build ${BUILD_ID}. Verify with: sudo kennet-panel --version"
+echo "Installed KEN-NET v${RELEASE_VERSION} build ${BUILD_ID:0:12}. Verify with: sudo kennet-panel --version"
 echo "Start the terminal menu with: sudo kennet-panel"
 echo "SSH, Dropbear, Xray, OpenVPN, UDP Custom, WireGuard, DNSTT, TLS, and WebSocket managers are included."
 echo "Configure the shared domain/TLS gateway before creating Xray, Dropbear WebSocket, or OpenVPN TCP/443 accounts."

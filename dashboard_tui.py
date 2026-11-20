@@ -59,16 +59,29 @@ LEGACY_ORDER = ("ssh", "vmess", "vless", "trojan", "shadowsocks", "dropbear",
                 "openvpn", "udp", "wireguard", "slowdns", "dnstt", "tls")
 TOOLS = (("13", "System settings"), ("14", "Protocol status"),
          ("15", "Services / ports"), ("0", "Exit"))
+VERSION_FILE = Path(__file__).with_name("VERSION")
+
+
+def _release_version() -> str:
+    try:
+        value = VERSION_FILE.read_text(encoding="utf-8").strip()
+        return value if value else "dev"
+    except OSError:
+        return "dev"
+
+
 RGB = {
     "ink": (10, 15, 28), "line": (38, 50, 76), "text": (207, 216, 234),
     "dim": (104, 119, 154), "blue": (92, 184, 255), "violet": (180, 156, 255),
     "mint": (79, 227, 176), "amber": (255, 180, 84), "rose": (255, 122, 156),
     "ok": (79, 227, 176), "off": (74, 86, 117), "error": (255, 107, 107),
-    # High contrast card fills: vivid color with near-black text remains readable.
-    "fill_red": (211, 83, 101), "fill_yellow": (245, 197, 91),
-    "fill_blue": (113, 190, 232), "fill_green": (113, 211, 164),
+    # Restrained translucent-style fills: dark enough to keep text readable.
+    "fill_red": (63, 39, 55), "fill_yellow": (65, 52, 32),
+    "fill_blue": (30, 48, 70), "fill_green": (28, 55, 49),
+    "fill_selected": (41, 70, 100),
+    "fill_banner": (231, 158, 48), "fill_header": (31, 48, 70),
 }
-CARD_FILLS = ("fill_red", "fill_yellow", "fill_blue", "fill_green")
+CARD_FILLS = ("fill_blue", "fill_blue", "fill_blue", "fill_blue")
 SPARK = "▁▂▃▄▅▆▇█"
 _activity = deque(maxlen=10)
 
@@ -344,12 +357,15 @@ class Dashboard:
                         "off": curses.COLOR_WHITE, "error": curses.COLOR_RED,
                         "text": curses.COLOR_WHITE, "dim": curses.COLOR_CYAN,
                         "line": curses.COLOR_BLUE, "ink": -1,
-                        "fill_red": curses.COLOR_RED, "fill_yellow": curses.COLOR_YELLOW,
-                        "fill_blue": curses.COLOR_CYAN, "fill_green": curses.COLOR_GREEN,
+                        "fill_red": curses.COLOR_BLACK, "fill_yellow": curses.COLOR_BLACK,
+                        "fill_blue": curses.COLOR_BLACK, "fill_green": curses.COLOR_BLACK,
+                        "fill_selected": curses.COLOR_BLUE,
+                        "fill_banner": curses.COLOR_YELLOW, "fill_header": curses.COLOR_BLUE,
                     }.get(name, curses.COLOR_WHITE)
                     if idx < curses.COLOR_PAIRS:
                         if name.startswith("fill_"):
-                            foreground = _xterm_index(RGB["ink"]) if curses.COLORS >= 256 else curses.COLOR_BLACK
+                            foreground = (curses.COLOR_BLACK if name == "fill_banner" else
+                                          _xterm_index(RGB["text"]) if curses.COLORS >= 256 else curses.COLOR_WHITE)
                             background = color
                         else:
                             foreground, background = color, -1
@@ -396,14 +412,14 @@ class Dashboard:
         self.put(y + height - 1, x, bl + h * (width - 2) + br, color)
 
     def _header(self, width: int) -> None:
-        title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
+        title = f"KEN-NET  •  SERVER MANAGEMENT PANEL  v{_release_version()}"
+        self.put(0, 1, " " * (width - 2), "fill_header", width=width - 2)
         if self.ascii:
-            self.put(0, 1, "[UBUNTU]", "amber", bold=True)
-            self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
+            self.put(0, 2, "[●] UBUNTU", "amber", bold=True)
+            self.put(0, max(15, (width - len(title)) // 2), title, "text", bold=True)
         else:
-            # Ubuntu's circle-of-friends mark rendered as a compact terminal glyph.
-            self.put(0, 1, "◉ UBUNTU", "amber", bold=True)
-            self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
+            self.put(0, 2, "◉ UBUNTU", "amber", bold=True)
+            self.put(0, max(15, (width - len(title)) // 2), title, "text", bold=True)
         os_name = str(self.snapshot.get("os", "Ubuntu"))
         self.put(1, 1, os_name, "dim", width=max(16, width // 2))
         domain = str(self.snapshot.get("domain", "—"))
@@ -428,7 +444,33 @@ class Dashboard:
             self.put(2, x + len(label) + 1, shown, color, bold=True,
                      width=max(8, gap - len(label) - 2))
 
-    def _summary(self, y: int, width: int) -> None:
+    def _summary(self, y: int, width: int, *, detailed: bool = False) -> None:
+        if detailed:
+            # Match the reference's compact status table at the upper left.
+            # On shorter terminals the existing two-column summary is retained
+            # to preserve vertical space for every protocol and the footer.
+            box_width = min(width - 2, 62)
+            self._box(y, 1, 9, box_width, "SERVER & ACCOUNT STATUS", "blue")
+            self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
+            self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
+                     width=box_width - 13)
+            summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
+            by_key = {row.key: row for row in self.rows}
+            for line, key in enumerate(summary_keys):
+                row = by_key.get(key)
+                if row is None:
+                    continue
+                active = row.state in {"Active", "Service active"}
+                state = "online" if active else "check" if "Partial" in row.state else "offline"
+                color = "ok" if active else "amber" if state == "check" else "dim"
+                noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "sessions" if key in {"vmess", "vless", "trojan"} else "online"
+                count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
+                self.put(y + 2 + line, 3, "●" if not self.ascii else "*", color, bold=True)
+                self.put(y + 2 + line, 5, row.title.upper(), "text", bold=True, width=14)
+                self.put(y + 2 + line, 21, state, color, width=9)
+                self.put(y + 2 + line, 31, f"{count} {noun}", color, width=box_width - 34)
+            return
+
         self._box(y, 1, 6, width - 2, "SERVER & ACCOUNT STATUS", "blue")
         self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
         self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
@@ -454,11 +496,13 @@ class Dashboard:
                      width=max(12, half - min(20, half // 2)))
 
     def _protocol_grid(self, top: int, width: int, *, compact: bool) -> None:
-        self.put(top, 1, "PROTOCOLS  /  ACCOUNT MANAGEMENT", "blue", bold=True)
-        card_columns = 2 if width >= 76 else 1
+        self.put(top, 1, " " * (width - 2), "fill_header", width=width - 2)
+        section = "◈  PROTOCOLS  •  ACCOUNT MANAGEMENT  ◈" if not self.ascii else "== PROTOCOLS / ACCOUNT MANAGEMENT =="
+        self.put(top, max(2, (width - len(section)) // 2), section, "blue", bold=True)
+        card_columns = 2 if width >= 72 else 1
         gap = 2 if card_columns == 2 else 0
         card_width = max(18, (width - 2 - gap) // card_columns)
-        card_height = 1 if compact else 3
+        card_height = 1 if getattr(self, "single_line_cards", False) else 2 if compact else 3
         icons = {"ssh": ">_", "vmess": "<>" , "vless": "<>" , "trojan": "<>" ,
                  "shadowsocks": "~", "dropbear": "*", "openvpn": "O", "udp": "#",
                  "wireguard": "W", "slowdns": "~", "dnstt": "@", "tls": "*"}
@@ -480,26 +524,38 @@ class Dashboard:
             icon = icons.get(key, "*")
             fill = CARD_FILLS[index % len(CARD_FILLS)]
             if compact:
-                text = f"[{short_number[key]}] {row.title}  {icon}  {state} · {count}"
-                self.put(y, x, " " * card_width, fill, width=card_width)
-                self.put(y, x + 1, text, fill, bold=True, width=card_width - 2)
+                border = "violet" if selected else "blue"
+                card_fill = "fill_selected" if selected else fill
+                left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
+                label = f" [{short_number[key]}] {row.title.upper()}  {icon} "
+                if getattr(self, "single_line_cards", False):
+                    inside = label[:max(0, card_width - 2)].ljust(card_width - 2)
+                    self.put(y, x, left + inside + right, card_fill, bold=selected, width=card_width)
+                    self.put(y, x, left, border, bold=True)
+                    self.put(y, x + card_width - 1, right, border, bold=True)
+                else:
+                    self.put(y + 1, x, " " * card_width, card_fill, width=card_width)
+                    self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
+                    self.put(y, x + 2, label, card_fill, bold=True, width=card_width - 4)
+                    self.put(y + 1, x, vertical, border)
+                    self.put(y + 1, x + 2, f"●  {state}   {count}", card_fill, bold=True, width=card_width - 4)
+                    self.put(y + 1, x + card_width - 1, vertical, border)
             else:
                 border = row.color if selected else "blue"
-                title = f" [{short_number[key]}] {row.title}  {icon} "
-                self.put(y, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
-                left, right, vertical = ("+", "+", "|") if self.ascii else ("╭", "╮", "│")
-                self.put(y, x, left, border, bold=selected)
-                self.put(y, x + card_width - 1, right, border, bold=selected)
-                self.put(y, x + 2, title, fill, bold=True, width=card_width - 4)
-                self.put(y + 1, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
+                card_fill = "fill_selected" if selected else fill
+                title = f" [{short_number[key]}] {row.title}  {icon} "[:card_width - 4]
+                left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
+                for card_row in range(card_height):
+                    self.put(y + card_row, x, " " * card_width, card_fill, width=card_width)
+                self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
+                self.put(y, x + 2, title, card_fill, bold=True, width=card_width - 4)
                 self.put(y + 1, x, vertical, border)
                 status = f"{'●' if not self.ascii else '*'} {state}  {count}"
-                self.put(y + 1, x + 2, status, fill, bold=True, width=card_width - 4)
+                self.put(y + 1, x + 2, status, card_fill, bold=True, width=card_width - 4)
                 self.put(y + 1, x + card_width - 1, vertical, border)
-                self.put(y + 2, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
                 bottom_left, bottom_right = ("+", "+") if self.ascii else ("╰", "╯")
-                self.put(y + 2, x, bottom_left, border, bold=selected)
-                self.put(y + 2, x + card_width - 1, bottom_right, border, bold=selected)
+                self.put(y + 2, x, bottom_left + horizontal * (card_width - 2) + bottom_right,
+                         border, bold=selected)
 
     def _protocol_list(self, top: int, height: int, width: int) -> None:
         self.put(top, 1, "PROTOCOLS", "blue", bold=True)
@@ -1110,15 +1166,14 @@ class Dashboard:
 
     def _tools(self, y: int, width: int) -> None:
         banner = " SETTINGS & TOOLS "
-        horizontal = "-" if self.ascii else "─"
-        left, right = ("+", "+") if self.ascii else ("╭", "╮")
-        rule = left + horizontal * max(1, (width - len(banner) - 4) // 2) + banner
-        rule += horizontal * max(1, width - len(rule) - 2) + right
-        self.put(y, 1, rule, "fill_yellow", bold=True, width=width - 2)
+        self.put(y, 1, " " * (width - 2), "fill_banner", width=width - 2)
         banner_x = max(2, (width - len(banner)) // 2)
-        self.put(y, banner_x, banner, "fill_yellow", bold=True, width=len(banner))
+        self.put(y, banner_x, banner, "fill_banner", bold=True, width=len(banner))
         columns = 2 if width >= 64 else 1
         card_width = max(20, (width - 2 - (columns - 1) * 2) // columns)
+        # Tool cards use one complete row each. The previous two-row form
+        # advanced only one row per card and let borders overwrite neighbors.
+        tool_fills = ("fill_blue",) * len(TOOLS)
         for index, (number, label) in enumerate(TOOLS):
             row, column = divmod(index, columns)
             x = 1 + column * (card_width + 2)
@@ -1126,13 +1181,16 @@ class Dashboard:
             selected = self.in_tools and index == self.tool_selected
             text = f" [{number}] {label} "
             if self.ascii:
-                left, right, line = "+", "+", "-"
+                left, right, line, vertical = "+", "+", "-", "|"
             else:
-                left, right, line = "╭", "╮", "─"
+                left, right, line, vertical = "╭", "╮", "─", "│"
+            fill = tool_fills[index]
+            if selected:
+                fill = "fill_selected"
             border = "amber" if selected else "blue"
-            self.put(card_y, x, " " * card_width, "fill_yellow", width=card_width)
+            self.put(card_y, x, left + text[:card_width - 2].ljust(card_width - 2) + right,
+                     fill, bold=selected, width=card_width)
             self.put(card_y, x, left, border, bold=True)
-            self.put(card_y, x + 1, text, "fill_yellow", bold=True, width=card_width - 2)
             self.put(card_y, x + card_width - 1, right, border, bold=True)
 
     def draw(self, force: bool = False) -> None:
@@ -1159,17 +1217,20 @@ class Dashboard:
         self.stdscr.erase()
         self._header(width)
         self._metric_line(width)
-        self._summary(4, width)
+        detailed_summary = height >= 44
+        self._summary(4, width, detailed=detailed_summary)
         # Six double-column cards need 18 rows; reserve two rows for tools and
         # three for the footer before switching to the condensed presentation.
-        compact = height < 36
-        grid_top = 10
+        compact = height < 44
+        self.single_line_cards = height < 34
+        grid_top = 13 if detailed_summary else 10
         self._protocol_grid(grid_top, width, compact=compact)
-        rows_per_col = (len(PROTOCOL_ORDER) + 1) // 2
+        columns = 2 if width >= 72 else 1
+        rows_per_col = (len(PROTOCOL_ORDER) + columns - 1) // columns
         # Expanded cards occupy three rows (top border, status, bottom border).
         # Compact cards occupy one. The previous two-row estimate caused the
         # tools banner to overwrite the final protocol cards.
-        grid_bottom = grid_top + 1 + rows_per_col * (1 if compact else 3)
+        grid_bottom = grid_top + 1 + rows_per_col * (1 if self.single_line_cards else 2 if compact else 3)
         tools_y = grid_bottom + 1
         self._tools(tools_y, width)
         footer_y = height - 3

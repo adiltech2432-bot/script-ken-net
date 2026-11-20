@@ -221,8 +221,7 @@ def menu() -> None:
         terminal_ui.option_cards(
             "SYSTEM SETTINGS",
             [(key, label) for key, (label, _) in actions.items()] + [("0", "Exit settings")],
-            columns=2, color=terminal_ui.YELLOW, fill=terminal_ui.YELLOW_BG,
-            text_color=terminal_ui.INK,
+            columns=2, color=terminal_ui.YELLOW,
         )
         choice = input("Select setting [0-10]: ").strip()
         if choice == "0":
