@@ -82,7 +82,7 @@ bob 122 sshd: bob@notty
         self.assertFalse(data["accounts"])
         self.assertEqual(atomic.call_args.args[0], services.STATE)
 
-    def test_expiry_timer_checks_accounts_every_minute(self):
+    def test_expiry_timer_checks_accounts_every_15_seconds(self):
         captured = {}
 
         def remember(path, contents, mode=0o600):
@@ -92,7 +92,8 @@ bob 122 sshd: bob@notty
             services.install_expiry_timer()
 
         timer = next(text for path, text in captured.items() if path.endswith("kennet-account-expiry.timer"))
-        self.assertIn("OnUnitActiveSec=1min", timer)
+        self.assertIn("OnBootSec=15s", timer)
+        self.assertIn("OnUnitActiveSec=15s", timer)
 
     def test_expired_linux_login_is_locked_and_sessions_are_terminated_before_deletion(self):
         calls = []

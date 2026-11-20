@@ -8,6 +8,13 @@ fi
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="/opt/kennet-panel"
+BUILD_ID="${KENNET_BUILD_ID:-}"
+if [[ -z "${BUILD_ID}" ]]; then
+  BUILD_ID="$(git -C "${SOURCE_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
+fi
+if [[ -z "${BUILD_ID}" ]]; then
+  BUILD_ID="local-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 REQUIRED=(panel.py dashboard_tui.py services_manager.py service_catalog.py terminal_ui.py settings_manager.py dropbear_manager.py wireguard_manager.py dnstt_manager.py dnstt_mux.py udp_custom_manager.py gateway_manager.py websocket_tunnel.py openvpn_manager.py ssh_ip_limit.py)
 
 for file in "${REQUIRED[@]}"; do
@@ -41,6 +48,9 @@ fi
 for file in "${REQUIRED[@]}"; do
   install -o root -g root -m 0644 "${SOURCE_DIR}/${file}" "${DEST_DIR}/${file}"
 done
+printf '%s\n' "${BUILD_ID}" > "${DEST_DIR}/BUILD"
+chown root:root "${DEST_DIR}/BUILD"
+chmod 0644 "${DEST_DIR}/BUILD"
 
 # Make sure expiry enforcement is enabled on existing installations and fresh
 # hosts, including hosts that already have managed accounts.
@@ -107,11 +117,17 @@ install -o root -g root -m 0644 "${SOURCE_DIR}/test_openvpn_manager.py" "${DEST_
 
 cat > /usr/local/bin/kennet-panel <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf 'KEN-NET build: '
+  cat /opt/kennet-panel/BUILD
+  exit 0
+fi
 exec /usr/bin/python3 /opt/kennet-panel/panel.py "$@"
 EOF
 chown root:root /usr/local/bin/kennet-panel
 chmod 0750 /usr/local/bin/kennet-panel
 
-echo "Installed. Start the terminal menu with: sudo kennet-panel"
+echo "Installed KEN-NET build ${BUILD_ID}. Verify with: sudo kennet-panel --version"
+echo "Start the terminal menu with: sudo kennet-panel"
 echo "SSH, Dropbear, Xray, OpenVPN, UDP Custom, WireGuard, DNSTT, TLS, and WebSocket managers are included."
 echo "Configure the shared domain/TLS gateway before creating Xray, Dropbear WebSocket, or OpenVPN TCP/443 accounts."
