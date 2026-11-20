@@ -75,7 +75,13 @@ def expiry_timestamp(days: int = 0, *, trial_minutes: int | None = None) -> str:
 
 def expiry_reached(value: str, now: dt.datetime | None = None) -> bool:
     try:
-        expiry = dt.datetime.fromisoformat(value)
+        # Account details display date-only expiries as valid through that
+        # calendar day. Trial expiries include a time and are enforced exactly.
+        if isinstance(value, str) and len(value) == 10:
+            expiry = dt.datetime.combine(dt.date.fromisoformat(value) + dt.timedelta(days=1),
+                                         dt.time.min)
+        else:
+            expiry = dt.datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return False
     current = now or dt.datetime.now(expiry.tzinfo)
@@ -330,12 +336,10 @@ def ssh_add(username: str, days: int, *, trial: bool = False, trial_minutes: int
         install_ssh_ip_limit()
     password = password or "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
     expiry = expiry_timestamp(days, trial_minutes=trial_minutes if trial else None)
-    # Linux shadow account expiry has day precision, while Kennet trials have
-    # minute precision. Do not let PAM expire a trial at midnight on its
-    # expiry date; the expiry timer enforces the exact timestamp from state.
-    linux_expiry = expiry
-    if trial:
-        linux_expiry = (dt.date.fromisoformat(expiry[:10]) + dt.timedelta(days=1)).isoformat()
+    # Linux shadow expiry is day based and expires at the start of the given
+    # date. Keep the OS account alive through the displayed valid-until date;
+    # the expiry timer enforces the exact state timestamp (including trials).
+    linux_expiry = (dt.date.fromisoformat(expiry[:10]) + dt.timedelta(days=1)).isoformat()
     _run(["useradd", "--create-home", "--shell", "/bin/sh", "--expiredate", linux_expiry, username])
     try:
         _run(["chpasswd"], f"{username}:{password}\n")
@@ -358,7 +362,8 @@ def udp_add(username: str, days: int = 30, *, trial: bool = False) -> str:
         raise ValueError("Username already exists")
     password = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#%") for _ in range(20))
     expiry = (dt.date.today() + dt.timedelta(days=int(days))).isoformat()
-    _run(["useradd", "--no-create-home", "--shell", "/usr/sbin/nologin", "--expiredate", expiry, username])
+    linux_expiry = (dt.date.fromisoformat(expiry) + dt.timedelta(days=1)).isoformat()
+    _run(["useradd", "--no-create-home", "--shell", "/usr/sbin/nologin", "--expiredate", linux_expiry, username])
     try:
         _run(["chpasswd"], f"{username}:{password}\n")
     except Exception:
@@ -541,8 +546,8 @@ ExecStart=/usr/bin/python3 /opt/kennet-panel/services_manager.py --expire
     timer = """[Unit]
 Description=Periodic Kennet account expiry check
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnBootSec=15s
+OnUnitActiveSec=15s
 Persistent=true
 [Install]
 WantedBy=timers.target
@@ -550,7 +555,9 @@ WantedBy=timers.target
     _atomic(Path("/etc/systemd/system/kennet-account-expiry.service"), service, 0o644)
     _atomic(Path("/etc/systemd/system/kennet-account-expiry.timer"), timer, 0o644)
     _run(["systemctl", "daemon-reload"])
-    _run(["systemctl", "enable", "--now", "kennet-account-expiry.timer"])
+    _run(["systemctl", "enable", "kennet-account-expiry.timer"])
+    # Restart so an already-installed timer picks up the 15-second cadence.
+    _run(["systemctl", "restart", "kennet-account-expiry.timer"])
 
 
 def purge_expired(today: dt.date | None = None) -> list[str]:

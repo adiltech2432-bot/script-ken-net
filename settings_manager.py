@@ -218,16 +218,29 @@ def menu() -> None:
         "10": ("Restart / reboot server", restart_or_reboot),
     }
     while True:
-        terminal_ui.option_cards("SYSTEM SETTINGS", [(key, label) for key, (label, _) in actions.items()] + [("0", "Exit settings")], columns=2, color=terminal_ui.YELLOW)
+        terminal_ui.option_cards(
+            "SYSTEM SETTINGS",
+            [(key, label) for key, (label, _) in actions.items()] + [("0", "Exit settings")],
+            columns=2, color=terminal_ui.YELLOW, fill=terminal_ui.YELLOW_BG,
+            text_color=terminal_ui.INK,
+        )
         choice = input("Select setting [0-10]: ").strip()
         if choice == "0":
             return
         action = actions.get(choice)
         if not action:
-            print("Invalid selection.")
+            print("Invalid selection. Choose one of the numbered settings.")
+            input("Press Enter to return to System Settings...")
             continue
+        terminal_ui.clear_screen()
+        terminal_ui.heading(f"SYSTEM SETTINGS  /  {action[0]}", terminal_ui.YELLOW)
+        succeeded = False
         try:
             action[1]()
+            succeeded = True
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
             print(f"Operation failed: {exc}")
+        if succeeded:
+            print("\nAction finished. Review the output above.")
+        input("\nPress Enter to return to System Settings...")
 

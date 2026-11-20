@@ -64,7 +64,11 @@ RGB = {
     "dim": (104, 119, 154), "blue": (92, 184, 255), "violet": (180, 156, 255),
     "mint": (79, 227, 176), "amber": (255, 180, 84), "rose": (255, 122, 156),
     "ok": (79, 227, 176), "off": (74, 86, 117), "error": (255, 107, 107),
+    # High contrast card fills: vivid color with near-black text remains readable.
+    "fill_red": (211, 83, 101), "fill_yellow": (245, 197, 91),
+    "fill_blue": (113, 190, 232), "fill_green": (113, 211, 164),
 }
+CARD_FILLS = ("fill_red", "fill_yellow", "fill_blue", "fill_green")
 SPARK = "▁▂▃▄▅▆▇█"
 _activity = deque(maxlen=10)
 
@@ -340,9 +344,16 @@ class Dashboard:
                         "off": curses.COLOR_WHITE, "error": curses.COLOR_RED,
                         "text": curses.COLOR_WHITE, "dim": curses.COLOR_CYAN,
                         "line": curses.COLOR_BLUE, "ink": -1,
+                        "fill_red": curses.COLOR_RED, "fill_yellow": curses.COLOR_YELLOW,
+                        "fill_blue": curses.COLOR_CYAN, "fill_green": curses.COLOR_GREEN,
                     }.get(name, curses.COLOR_WHITE)
                     if idx < curses.COLOR_PAIRS:
-                        curses.init_pair(idx, color, -1)
+                        if name.startswith("fill_"):
+                            foreground = _xterm_index(RGB["ink"]) if curses.COLORS >= 256 else curses.COLOR_BLACK
+                            background = color
+                        else:
+                            foreground, background = color, -1
+                        curses.init_pair(idx, foreground, background)
                         self.pairs[name] = idx
         except curses.error:
             self.pairs = {}
@@ -467,16 +478,28 @@ class Dashboard:
             state = "ACTIVE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
             count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
             icon = icons.get(key, "*")
+            fill = CARD_FILLS[index % len(CARD_FILLS)]
             if compact:
                 text = f"[{short_number[key]}] {row.title}  {icon}  {state} · {count}"
-                self.put(y, x, text, row.color if selected else "text",
-                         bold=True, reverse=selected, width=card_width)
+                self.put(y, x, " " * card_width, fill, width=card_width)
+                self.put(y, x + 1, text, fill, bold=True, width=card_width - 2)
             else:
-                self._box(y, x, 3, card_width, f"[{short_number[key]}] {row.title}  {icon}",
-                          row.color if selected else "blue")
+                border = row.color if selected else "blue"
+                title = f" [{short_number[key]}] {row.title}  {icon} "
+                self.put(y, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
+                left, right, vertical = ("+", "+", "|") if self.ascii else ("╭", "╮", "│")
+                self.put(y, x, left, border, bold=selected)
+                self.put(y, x + card_width - 1, right, border, bold=selected)
+                self.put(y, x + 2, title, fill, bold=True, width=card_width - 4)
+                self.put(y + 1, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
+                self.put(y + 1, x, vertical, border)
                 status = f"{'●' if not self.ascii else '*'} {state}  {count}"
-                self.put(y + 1, x + 2, status, "ok" if active else "amber" if state == "CHECK" else "dim",
-                         bold=True, reverse=selected, width=card_width - 4)
+                self.put(y + 1, x + 2, status, fill, bold=True, width=card_width - 4)
+                self.put(y + 1, x + card_width - 1, vertical, border)
+                self.put(y + 2, x + 1, " " * (card_width - 2), fill, width=card_width - 2)
+                bottom_left, bottom_right = ("+", "+") if self.ascii else ("╰", "╯")
+                self.put(y + 2, x, bottom_left, border, bold=selected)
+                self.put(y + 2, x + card_width - 1, bottom_right, border, bold=selected)
 
     def _protocol_list(self, top: int, height: int, width: int) -> None:
         self.put(top, 1, "PROTOCOLS", "blue", bold=True)
@@ -1091,7 +1114,9 @@ class Dashboard:
         left, right = ("+", "+") if self.ascii else ("╭", "╮")
         rule = left + horizontal * max(1, (width - len(banner) - 4) // 2) + banner
         rule += horizontal * max(1, width - len(rule) - 2) + right
-        self.put(y, 1, rule, "amber", bold=True, reverse=True, width=width - 2)
+        self.put(y, 1, rule, "fill_yellow", bold=True, width=width - 2)
+        banner_x = max(2, (width - len(banner)) // 2)
+        self.put(y, banner_x, banner, "fill_yellow", bold=True, width=len(banner))
         columns = 2 if width >= 64 else 1
         card_width = max(20, (width - 2 - (columns - 1) * 2) // columns)
         for index, (number, label) in enumerate(TOOLS):
@@ -1105,8 +1130,10 @@ class Dashboard:
             else:
                 left, right, line = "╭", "╮", "─"
             border = "amber" if selected else "blue"
-            self.put(card_y, x, left + text + line * max(0, card_width - len(text) - 2) + right,
-                     border, bold=True, reverse=selected, width=card_width)
+            self.put(card_y, x, " " * card_width, "fill_yellow", width=card_width)
+            self.put(card_y, x, left, border, bold=True)
+            self.put(card_y, x + 1, text, "fill_yellow", bold=True, width=card_width - 2)
+            self.put(card_y, x + card_width - 1, right, border, bold=True)
 
     def draw(self, force: bool = False) -> None:
         height, width = self.stdscr.getmaxyx()

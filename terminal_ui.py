@@ -11,6 +11,8 @@ CYAN = "\033[96m"
 BLUE = "\033[94m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
+YELLOW_BG = "\033[48;2;245;197;91m"
+INK = "\033[38;2;13;17;23m"
 MAGENTA = "\033[95m"
 RESET = "\033[0m"
 
@@ -33,7 +35,8 @@ def heading(title: str, color: str = CYAN) -> None:
 
 def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2,
                  color: str = BLUE, clear: bool = True, compact: bool = False,
-                 colorful: bool = False) -> None:
+                 colorful: bool = False, fill: str | None = None,
+                 text_color: str = "\033[30m") -> None:
     if clear:
         clear_screen()
     heading(title, color)
@@ -54,7 +57,10 @@ def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2
                 available = cell_width - 2
                 if len(content) > available:
                     content = content[:available - 1] + " "
-                parts.append(item_color + "╭" + content + "─" * (available - len(content)) + "╮" + RESET)
+                if fill:
+                    parts.append(fill + text_color + " " + content + " " * (available - len(content)) + " " + RESET)
+                else:
+                    parts.append(item_color + "╭" + content + "─" * (available - len(content)) + "╮" + RESET)
             print(gap.join(parts))
             continue
         cards: list[list[str]] = []
@@ -67,6 +73,17 @@ def option_cards(title: str, options: list[tuple[str, str]], *, columns: int = 2
             cards.append(card_lines)
         height = max(map(len, cards), default=1) + 2
         for row in range(height):
+            if fill:
+                parts = []
+                for card in cards:
+                    if row == 0 or row == height - 1:
+                        content = " " * (cell_width - 2)
+                    else:
+                        content = card[row - 1] if row - 1 < len(card) else ""
+                        content = " " + content[:inner_width].ljust(inner_width) + " "
+                    parts.append(fill + text_color + content.ljust(cell_width)[:cell_width] + RESET)
+                print(gap.join(parts))
+                continue
             if row == 0:
                 parts = [item_color + "╭" + "─" * (cell_width - 2) + "╮" + RESET for item_color in group_colors]
             elif row == height - 1:
