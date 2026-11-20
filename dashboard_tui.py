@@ -385,11 +385,11 @@ class Dashboard:
     def _header(self, width: int) -> None:
         title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         if self.ascii:
-            self.put(0, 1, "[U]", "amber", bold=True)
+            self.put(0, 1, "[UBUNTU]", "amber", bold=True)
             self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
         else:
             # Ubuntu's circle-of-friends mark rendered as a compact terminal glyph.
-            self.put(0, 1, "◉", "amber", bold=True)
+            self.put(0, 1, "◉ UBUNTU", "amber", bold=True)
             self.put(0, max(5, (width - len(title)) // 2), title, "blue", bold=True)
         os_name = str(self.snapshot.get("os", "Ubuntu"))
         self.put(1, 1, os_name, "dim", width=max(16, width // 2))
@@ -445,7 +445,7 @@ class Dashboard:
         card_columns = 2 if width >= 76 else 1
         gap = 2 if card_columns == 2 else 0
         card_width = max(18, (width - 2 - gap) // card_columns)
-        card_height = 1 if compact else 2
+        card_height = 1 if compact else 3
         icons = {"ssh": ">_", "vmess": "<>" , "vless": "<>" , "trojan": "<>" ,
                  "shadowsocks": "~", "dropbear": "*", "openvpn": "O", "udp": "#",
                  "wireguard": "W", "slowdns": "~", "dnstt": "@", "tls": "*"}
@@ -464,24 +464,18 @@ class Dashboard:
             count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
             icon = icons.get(key, "*")
             if compact:
-                text = f"[{short_number[key]}] {row.title:<14} {state:<7} {count}  {icon}"
-                edge = "╭" if not self.ascii else "["
-                end = "╮" if not self.ascii else "]"
-                content = (edge + " " + text[:max(1, card_width - 4)].ljust(max(1, card_width - 4)) + " " + end)
-                self.put(y, x, content, row.color if selected else ("ok" if active else "line"),
-                         bold=selected, reverse=selected, width=card_width)
+                text = f"[{short_number[key]}] {row.title}   {icon}   {state} · {count}"
+                self.put(y, x, "╭" if not self.ascii else "+", "violet" if selected else "blue", bold=True)
+                self.put(y, x + 1, text, row.color if selected else "text",
+                         bold=True, reverse=selected, width=card_width - 3)
+                self.put(y, x + card_width - 1, "╮" if not self.ascii else "+",
+                         "violet" if selected else "blue", bold=True)
             else:
-                horizontal = "-" if self.ascii else "─"
-                left, right = ("+", "+") if self.ascii else ("╭", "╮")
-                self.put(y, x, left + horizontal * (card_width - 2) + right,
-                         row.color if selected else "line", bold=selected)
-                title = f" [{short_number[key]}] {row.title}"
-                self.put(y, x + 2, title, row.color, bold=True, reverse=selected,
-                         width=card_width - 5)
+                self._box(y, x, 3, card_width, f"[{short_number[key]}] {row.title}  {icon}",
+                          row.color if selected else "blue")
                 status = f"{'●' if not self.ascii else '*'} {state}  {count}"
                 self.put(y + 1, x + 2, status, "ok" if active else "amber" if state == "CHECK" else "dim",
-                         width=card_width - 5)
-                self.put(y + 1, x + card_width - 1, "│" if not self.ascii else "|", "line")
+                         bold=True, reverse=selected, width=card_width - 4)
 
     def _protocol_list(self, top: int, height: int, width: int) -> None:
         self.put(top, 1, "PROTOCOLS", "blue", bold=True)
@@ -1087,9 +1081,9 @@ class Dashboard:
                 left, right, line = "+", "+", "-"
             else:
                 left, right, line = "╭", "╮", "─"
+            border = "amber" if selected else "blue"
             self.put(card_y, x, left + text + line * max(0, card_width - len(text) - 2) + right,
-                     "amber" if selected or index == 0 else "line", bold=True,
-                     reverse=selected, width=card_width)
+                     border, bold=True, reverse=selected, width=card_width)
 
     def draw(self, force: bool = False) -> None:
         height, width = self.stdscr.getmaxyx()
@@ -1116,7 +1110,7 @@ class Dashboard:
         self._header(width)
         self._metric_line(width)
         self._summary(4, width)
-        compact = height < 34
+        compact = height < 40
         grid_top = 10
         self._protocol_grid(grid_top, width, compact=compact)
         rows_per_col = (len(PROTOCOL_ORDER) + 1) // 2
