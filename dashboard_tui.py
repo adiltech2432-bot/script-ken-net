@@ -413,7 +413,6 @@ class Dashboard:
 
     def _header(self, width: int) -> None:
         title = f"KEN-NET  •  SERVER MANAGEMENT PANEL  v{_release_version()}"
-        self.put(0, 1, " " * (width - 2), "fill_header", width=width - 2)
         if self.ascii:
             self.put(0, 2, "[●] UBUNTU", "amber", bold=True)
             self.put(0, max(15, (width - len(title)) // 2), title, "text", bold=True)
@@ -496,7 +495,6 @@ class Dashboard:
                      width=max(12, half - min(20, half // 2)))
 
     def _protocol_grid(self, top: int, width: int, *, compact: bool) -> None:
-        self.put(top, 1, " " * (width - 2), "fill_header", width=width - 2)
         section = "◈  PROTOCOLS  •  ACCOUNT MANAGEMENT  ◈" if not self.ascii else "== PROTOCOLS / ACCOUNT MANAGEMENT =="
         self.put(top, max(2, (width - len(section)) // 2), section, "blue", bold=True)
         card_columns = 2 if width >= 72 else 1
@@ -522,36 +520,29 @@ class Dashboard:
             state = "ACTIVE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
             count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
             icon = icons.get(key, "*")
-            fill = CARD_FILLS[index % len(CARD_FILLS)]
             if compact:
                 border = "violet" if selected else "blue"
-                card_fill = "fill_selected" if selected else fill
                 left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
                 label = f" [{short_number[key]}] {row.title.upper()}  {icon} "
                 if getattr(self, "single_line_cards", False):
                     inside = label[:max(0, card_width - 2)].ljust(card_width - 2)
-                    self.put(y, x, left + inside + right, card_fill, bold=selected, width=card_width)
-                    self.put(y, x, left, border, bold=True)
-                    self.put(y, x + card_width - 1, right, border, bold=True)
+                    self.put(y, x, left + inside + right, border, bold=selected, width=card_width)
+                    self.put(y, x + 2, label, row.color, bold=True, width=card_width - 4)
                 else:
-                    self.put(y + 1, x, " " * card_width, card_fill, width=card_width)
                     self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
-                    self.put(y, x + 2, label, card_fill, bold=True, width=card_width - 4)
+                    self.put(y, x + 2, label, row.color, bold=True, width=card_width - 4)
                     self.put(y + 1, x, vertical, border)
-                    self.put(y + 1, x + 2, f"●  {state}   {count}", card_fill, bold=True, width=card_width - 4)
+                    self.put(y + 1, x + 2, f"●  {state}   {count}", "ok" if active else "amber" if "CHECK" == state else "dim", bold=True, width=card_width - 4)
                     self.put(y + 1, x + card_width - 1, vertical, border)
             else:
                 border = row.color if selected else "blue"
-                card_fill = "fill_selected" if selected else fill
                 title = f" [{short_number[key]}] {row.title}  {icon} "[:card_width - 4]
                 left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
-                for card_row in range(card_height):
-                    self.put(y + card_row, x, " " * card_width, card_fill, width=card_width)
                 self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
-                self.put(y, x + 2, title, card_fill, bold=True, width=card_width - 4)
+                self.put(y, x + 2, title, row.color, bold=True, width=card_width - 4)
                 self.put(y + 1, x, vertical, border)
                 status = f"{'●' if not self.ascii else '*'} {state}  {count}"
-                self.put(y + 1, x + 2, status, card_fill, bold=True, width=card_width - 4)
+                self.put(y + 1, x + 2, status, "ok" if active else "amber" if state == "CHECK" else "dim", bold=True, width=card_width - 4)
                 self.put(y + 1, x + card_width - 1, vertical, border)
                 bottom_left, bottom_right = ("+", "+") if self.ascii else ("╰", "╯")
                 self.put(y + 2, x, bottom_left + horizontal * (card_width - 2) + bottom_right,
@@ -1166,6 +1157,9 @@ class Dashboard:
 
     def _tools(self, y: int, width: int) -> None:
         banner = " SETTINGS & TOOLS "
+        # The gold section strip is the one intentional filled region; protocol
+        # and action cards stay transparent so terminals with limited palettes
+        # do not turn them into opaque grey blocks.
         self.put(y, 1, " " * (width - 2), "fill_banner", width=width - 2)
         banner_x = max(2, (width - len(banner)) // 2)
         self.put(y, banner_x, banner, "fill_banner", bold=True, width=len(banner))
@@ -1173,7 +1167,6 @@ class Dashboard:
         card_width = max(20, (width - 2 - (columns - 1) * 2) // columns)
         # Tool cards use one complete row each. The previous two-row form
         # advanced only one row per card and let borders overwrite neighbors.
-        tool_fills = ("fill_blue",) * len(TOOLS)
         for index, (number, label) in enumerate(TOOLS):
             row, column = divmod(index, columns)
             x = 1 + column * (card_width + 2)
@@ -1184,12 +1177,11 @@ class Dashboard:
                 left, right, line, vertical = "+", "+", "-", "|"
             else:
                 left, right, line, vertical = "╭", "╮", "─", "│"
-            fill = tool_fills[index]
-            if selected:
-                fill = "fill_selected"
             border = "amber" if selected else "blue"
             self.put(card_y, x, left + text[:card_width - 2].ljust(card_width - 2) + right,
-                     fill, bold=selected, width=card_width)
+                     border, bold=selected, width=card_width)
+            self.put(card_y, x + 2, text, "amber" if selected else "text", bold=selected,
+                     width=card_width - 4)
             self.put(card_y, x, left, border, bold=True)
             self.put(card_y, x + card_width - 1, right, border, bold=True)
 
@@ -1224,16 +1216,23 @@ class Dashboard:
         compact = height < 44
         self.single_line_cards = height < 34
         grid_top = 13 if detailed_summary else 10
-        self._protocol_grid(grid_top, width, compact=compact)
         columns = 2 if width >= 72 else 1
         rows_per_col = (len(PROTOCOL_ORDER) + columns - 1) // columns
-        # Expanded cards occupy three rows (top border, status, bottom border).
-        # Compact cards occupy one. The previous two-row estimate caused the
-        # tools banner to overwrite the final protocol cards.
-        grid_bottom = grid_top + 1 + rows_per_col * (1 if self.single_line_cards else 2 if compact else 3)
+        footer_y = height - 3
+        # Pick a card density from the actual available rows. Keep the tools
+        # banner and both tool rows above the footer even in resized terminals.
+        def tools_start(card_rows: int) -> int:
+            return grid_top + 1 + rows_per_col * card_rows + 1
+        if tools_start(3) + 2 >= footer_y:
+            compact = True
+        if tools_start(2) + 2 >= footer_y:
+            compact = True
+            self.single_line_cards = True
+        self._protocol_grid(grid_top, width, compact=compact)
+        card_rows = 1 if self.single_line_cards else 2 if compact else 3
+        grid_bottom = grid_top + 1 + rows_per_col * card_rows
         tools_y = grid_bottom + 1
         self._tools(tools_y, width)
-        footer_y = height - 3
         self.put(footer_y, 1, ("-" if self.ascii else "─") * (width - 2), "line")
         prompt = f"Select option [0-15]: {self.numeric}{' ' if self.ascii else '▌'}"
         hint = "Up/Down move · Enter open · Esc back"

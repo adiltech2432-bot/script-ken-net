@@ -215,6 +215,24 @@ def _expire_linux_user(username: str) -> None:
     subprocess.run(["userdel", "-r", username], capture_output=True, check=True)
 
 
+def _linux_account_expiry(username: str) -> dt.date | None:
+    """Read a finite shadow expiry for a managed Linux login without exposing its hash."""
+    if not NAME_RE.fullmatch(username):
+        return None
+    result = subprocess.run(["getent", "shadow", username], capture_output=True,
+                            text=True, check=False)
+    if result.returncode or not result.stdout:
+        return None
+    fields = result.stdout.rstrip("\n").split(":")
+    if len(fields) < 8 or fields[0] != username or not fields[7]:
+        return None
+    try:
+        days = int(fields[7])
+        return dt.date(1970, 1, 1) + dt.timedelta(days=days) if days > 0 else None
+    except (ValueError, OverflowError):
+        return None
+
+
 def set_domain(domain: str, *, issue_certificate: bool = True) -> None:
     domain = domain.strip().lower().rstrip(".")
     if not DOMAIN_RE.fullmatch(domain):
@@ -393,7 +411,9 @@ def udp_renew(username: str, days: int) -> None:
     if username not in udp_list() or not 1 <= int(days) <= 3650:
         raise ValueError("Invalid UDP-Custom username or validity period")
     expiry = (dt.date.today() + dt.timedelta(days=int(days))).isoformat()
-    _run(["chage", "-E", expiry, username])
+    # Shadow's expiry date is the first blocked day; manager dates are inclusive.
+    os_expiry = (dt.date.fromisoformat(expiry) + dt.timedelta(days=1)).isoformat()
+    _run(["chage", "-E", os_expiry, username])
     data = state(); data["accounts"][username]["expires_at"] = expiry
     data["accounts"][username]["trial"] = False
     _atomic(STATE, json.dumps(data, indent=2) + "\n")
@@ -416,7 +436,9 @@ def ssh_renew(username: str, days: int) -> None:
     if username not in ssh_list(): raise ValueError("Managed SSH account not found")
     if not 1 <= days <= 3650: raise ValueError("Validity must be from 1 to 3650 days")
     expiry=(dt.date.today()+dt.timedelta(days=days)).isoformat()
-    _run(["chage","-E",expiry,username])
+    # Manager expiry dates are inclusive; shadow's date is the first blocked day.
+    os_expiry=(dt.date.fromisoformat(expiry)+dt.timedelta(days=1)).isoformat()
+    _run(["chage","-E",os_expiry,username])
     data=state(); data["accounts"][username]["expires_at"]=expiry; data["accounts"][username]["trial"]=False
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
 
@@ -567,12 +589,25 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
     xray_expired = []
     for username, record in list(data.get("accounts", {}).items()):
         value = record.get("expires_at")
-        if not value:
-            continue
-        try:
-            is_expired = expiry_reached(value)
-        except ValueError:
-            continue
+        if not value or str(value).lower() in {"unknown", "none", "no expiry"}:
+            # Older panel records can lack expiry metadata while Linux still
+            # stores an expiry in shadow. Only use this fallback for a managed
+            # SSH/UDP identity; accounts with no finite system expiry remain.
+            os_expiry = _linux_account_expiry(username) if record.get("protocol") in {"ssh", "udp"} else None
+            if os_expiry is None:
+                continue
+            value = (os_expiry - dt.timedelta(days=1)).isoformat()
+            record["expires_at"] = value
+            _atomic(STATE, json.dumps(data, indent=2) + "\n")
+            if os_expiry <= today:
+                is_expired = True
+            else:
+                continue
+        else:
+            try:
+                is_expired = expiry_reached(value)
+            except (TypeError, ValueError):
+                continue
         if not is_expired:
             continue
         if record.get("protocol") in {"ssh", "udp"}:

@@ -82,6 +82,72 @@ bob 122 sshd: bob@notty
         self.assertFalse(data["accounts"])
         self.assertEqual(atomic.call_args.args[0], services.STATE)
 
+    def test_expiry_purge_recovers_and_deletes_legacy_ssh_account_from_shadow_expiry(self):
+        from datetime import date
+
+        data = {"accounts": {"alice": {"protocol": "ssh", "max_ips": 1}}}
+        with patch.object(services, "state", return_value=data), \
+             patch.object(services, "_linux_account_expiry", return_value=date(2026, 11, 20)), \
+             patch.object(services, "_expire_linux_user") as expire_user, \
+             patch.object(services, "_archive_expired") as archive, \
+             patch.object(services, "_atomic"), \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", return_value=[]), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]), \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]):
+            expired = services.purge_expired(today=date(2026, 11, 20))
+
+        self.assertEqual(expired, ["alice"])
+        expire_user.assert_called_once_with("alice")
+        archive.assert_called_once_with("ssh", "alice", {
+            "protocol": "ssh", "max_ips": 1, "expires_at": "2026-11-19"
+        })
+        self.assertNotIn("alice", data["accounts"])
+
+    def test_expiry_purge_reconciles_future_legacy_shadow_expiry_without_deleting(self):
+        from datetime import date
+
+        data = {"accounts": {"bob": {"protocol": "ssh", "max_ips": 1}}}
+        with patch.object(services, "state", return_value=data), \
+             patch.object(services, "_linux_account_expiry", return_value=date(2026, 11, 21)), \
+             patch.object(services, "_expire_linux_user") as expire_user, \
+             patch.object(services, "_archive_expired"), \
+             patch.object(services, "_atomic"), \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", return_value=[]), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]), \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]):
+            expired = services.purge_expired(today=date(2026, 11, 20))
+
+        self.assertEqual(expired, [])
+        expire_user.assert_not_called()
+        self.assertEqual(data["accounts"]["bob"]["expires_at"], "2026-11-20")
+
+    def test_expiry_purge_keeps_legacy_account_without_finite_shadow_expiry(self):
+        from datetime import date
+
+        data = {"accounts": {"permanent": {"protocol": "ssh", "max_ips": 0}}}
+        with patch.object(services, "state", return_value=data), \
+             patch.object(services, "_linux_account_expiry", return_value=None), \
+             patch.object(services, "_expire_linux_user") as expire_user, \
+             patch.object(services, "_archive_expired"), \
+             patch.object(services, "_atomic"), \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", return_value=[]), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]), \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]):
+            expired = services.purge_expired(today=date(2026, 11, 20))
+
+        self.assertEqual(expired, [])
+        expire_user.assert_not_called()
+        self.assertIn("permanent", data["accounts"])
+
     def test_expiry_timer_checks_accounts_every_15_seconds(self):
         captured = {}
 
