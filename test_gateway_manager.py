@@ -12,6 +12,15 @@ import websocket_tunnel
 
 
 class GatewayRenderingTests(unittest.TestCase):
+    def test_cloudflare_client_ip_is_trusted_only_for_cloudflare_proxy_peers(self):
+        config = gateway_manager.render_client_ip_config()
+        self.assertIn("geo $proxy_protocol_addr $kennet_cloudflare_peer", config)
+        self.assertIn("104.16.0.0/13 1;", config)
+        self.assertIn("2606:4700::/32 1;", config)
+        self.assertIn("map \"$kennet_cloudflare_peer:$http_cf_connecting_ip\" $kennet_client_ip", config)
+        self.assertIn("default $proxy_protocol_addr;", config)
+        self.assertIn("(?<kennet_cf_client_ip>[0-9A-Fa-f:.]+)", config)
+
     def test_public_xray_gateway_readiness_does_not_require_ssh_websocket_bridge(self):
         from types import SimpleNamespace
 
@@ -59,8 +68,8 @@ class GatewayRenderingTests(unittest.TestCase):
         self.assertIn("location = /trojan-ws", config)
         self.assertIn("listen 127.0.0.1:8443 ssl http2 proxy_protocol", config)
         self.assertIn("listen 127.0.0.1:8081 proxy_protocol;", config)
-        self.assertIn("proxy_set_header X-Forwarded-For $proxy_protocol_addr;", config)
-        self.assertIn("grpc_set_header X-Forwarded-For $proxy_protocol_addr;", config)
+        self.assertIn("proxy_set_header X-Forwarded-For $kennet_client_ip;", config)
+        self.assertIn("grpc_set_header X-Forwarded-For $kennet_client_ip;", config)
         self.assertNotIn("listen 127.0.0.1:8081 http2", config)
         self.assertIn("proxy_pass http://127.0.0.1:10015", config)
         self.assertIn("location ^~ /trojan-grpc/", config)

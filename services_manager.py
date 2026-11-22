@@ -1404,8 +1404,9 @@ def _managed_protocol_inbounds(protocol: str, clients: list[dict]) -> list[dict]
         stream = {
             "network": network,
             "security": "none",
-            # The local Nginx gateway overwrites this header with the original
-            # client address recovered from HAProxy's PROXY protocol header.
+            # The local Nginx gateway overwrites this header with a verified
+            # client address: Cloudflare's visitor IP for a trusted edge, or
+            # HAProxy's PROXY protocol peer for direct connections.
             "sockopt": {"trustedXForwardedFor": ["X-Forwarded-For"]},
         }
         if network == "ws":

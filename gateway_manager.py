@@ -12,12 +12,46 @@ import services_manager
 
 NGINX_SITE = Path("/etc/nginx/sites-available/kennet-panel")
 NGINX_LINK = Path("/etc/nginx/sites-enabled/kennet-panel")
+NGINX_CLIENT_IP = Path("/etc/nginx/conf.d/kennet-client-ip.conf")
 HAPROXY_CFG = Path("/etc/haproxy/conf.d/kennet-panel.cfg")
 WS_SOURCE = Path("/opt/kennet-panel/websocket_tunnel.py")
 WS_UNIT = Path("/etc/systemd/system/kennet-websocket.service")
 WS_SCRIPT = Path("/usr/local/lib/kennet-panel/websocket_tunnel.py")
 HAPROXY_BEGIN = "# BEGIN KEN-NET MANAGED FRONTENDS"
 HAPROXY_END = "# END KEN-NET MANAGED FRONTENDS"
+CLOUDFLARE_IPV4_CIDRS = (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+)
+CLOUDFLARE_IPV6_CIDRS = (
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+)
+
+
+def render_client_ip_config() -> str:
+    """Trust Cloudflare's visitor IP header only when HAProxy reports a CF edge.
+
+    HAProxy's PROXY protocol address is the authoritative peer address here.
+    A direct client therefore cannot spoof CF-Connecting-IP to inflate or hide
+    Xray online-user counts.
+    """
+    trusted_ranges = "\n".join(
+        f"    {cidr} 1;" for cidr in (*CLOUDFLARE_IPV4_CIDRS, *CLOUDFLARE_IPV6_CIDRS)
+    )
+    return f"""# Managed by Ken-net. Cloudflare ranges from https://www.cloudflare.com/ips-v4 and /ips-v6.
+geo $proxy_protocol_addr $kennet_cloudflare_peer {{
+    default 0;
+{trusted_ranges}
+}}
+
+map "$kennet_cloudflare_peer:$http_cf_connecting_ip" $kennet_client_ip {{
+    default $proxy_protocol_addr;
+    ~^1:(?<kennet_cf_client_ip>[0-9A-Fa-f:.]+)$ $kennet_cf_client_ip;
+}}
+"""
 
 
 def render_haproxy(tls_cert: str | None = None) -> str:
@@ -163,7 +197,7 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
         "        proxy_set_header Upgrade $http_upgrade;\n"
         "        proxy_set_header Connection \"upgrade\";\n"
         "        proxy_set_header X-Real-Host $http_x_real_host;\n"
-        "        proxy_set_header X-Forwarded-For $proxy_protocol_addr;\n"
+        "        proxy_set_header X-Forwarded-For $kennet_client_ip;\n"
         "        proxy_read_timeout 1h;\n"
         "    }"
         for path, (port, upstream_path) in ws_locations.items()
@@ -179,7 +213,7 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
     grpc_locations = "\n".join(
         f"    location ^~ /{name}-grpc/ {{\n"
         f"        grpc_pass grpc://127.0.0.1:{port};\n"
-        "        grpc_set_header X-Forwarded-For $proxy_protocol_addr;\n"
+        "        grpc_set_header X-Forwarded-For $kennet_client_ip;\n"
         "        grpc_read_timeout 1h;\n"
         "    }"
         for name, port in (("vless", 10005), ("vmess", 10006), ("trojan", 10007), ("ss", 10008))
@@ -284,6 +318,7 @@ def install() -> None:
     # Keep distro defaults disabled so there is a single intentional owner of 80/443.
     default_site = Path("/etc/nginx/sites-enabled/default")
     default_site.unlink(missing_ok=True)
+    _atomic(NGINX_CLIENT_IP, render_client_ip_config())
     cert_available = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").is_file() and Path(f"/etc/letsencrypt/live/{domain}/privkey.pem").is_file()
     site_text = render_nginx(domain, include_tls=cert_available)
     _atomic(NGINX_SITE, site_text)
