@@ -1091,8 +1091,7 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
             cfg["inbounds"].append(inbound)
         else:
             current_clients = (existing.setdefault("settings", {}).setdefault("clients", []))
-            if not any(item.get("email") == username for item in current_clients):
-                current_clients.append(client)
+            existing["settings"]["clients"] = _upsert_xray_client(current_clients, client)
     _write_xray(cfg)
     expires = expiry_timestamp(days, trial_minutes=trial_minutes if trial else None)
     data["accounts"][username] = {"protocol":protocol,"credential":credential,"port":port,"expires_at":expires,"trial":trial}
@@ -1174,6 +1173,22 @@ def _xray_client(protocol: str, username: str, credential: str) -> dict:
     if protocol == "trojan":
         return {"password": credential, "email": username}
     return {"method": "chacha20-ietf-poly1305", "password": credential, "email": username}
+
+
+def _upsert_xray_client(clients: list[dict], client: dict) -> list[dict]:
+    """Replace stale credentials for this email while preserving other users."""
+    result = []
+    inserted = False
+    for existing in clients:
+        if isinstance(existing, dict) and existing.get("email") == client.get("email"):
+            if not inserted:
+                result.append(dict(client))
+                inserted = True
+            continue
+        result.append(existing)
+    if not inserted:
+        result.append(dict(client))
+    return result
 
 
 def _managed_protocol_inbounds(protocol: str, clients: list[dict]) -> list[dict]:

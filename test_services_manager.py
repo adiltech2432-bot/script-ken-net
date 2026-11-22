@@ -259,6 +259,44 @@ bob 122 sshd: bob@notty
         self.assertEqual(services._xray_client("vmess", "alice", "alice")["id"], "alice")
         self.assertEqual(services._xray_client("trojan", "alice", "alice")["password"], "alice")
 
+    def test_recreating_xray_username_replaces_stale_shared_inbound_credentials(self):
+        import gateway_manager
+
+        old = {"password": "stale", "email": "alice"}
+        other = {"password": "bob-secret", "email": "bob"}
+        config = {"inbounds": [
+            {"tag": tag, "settings": {"clients": [dict(old), dict(other), dict(old)]}}
+            for tag in services._managed_tags("trojan")
+        ]}
+        state = {"domain": "vpn.example.com", "accounts": {}}
+        with patch.object(services, "state", return_value=state), \
+             patch.object(services, "get_xray_config", return_value=config), \
+             patch.object(services.Path, "is_file", return_value=True), \
+             patch.object(gateway_manager, "is_ready", return_value=(True, "ready")), \
+             patch.object(services, "_write_xray"), \
+             patch.object(services, "_atomic"), \
+             patch.object(services, "install_expiry_timer"):
+            services.xray_add("trojan", "alice", 30)
+
+        self.assertEqual(state["accounts"]["alice"]["credential"], "alice")
+        for inbound in config["inbounds"]:
+            clients = inbound["settings"]["clients"]
+            self.assertEqual([client["email"] for client in clients], ["alice", "bob"])
+            self.assertEqual(clients[0]["password"], "alice")
+            self.assertEqual(clients[1]["password"], "bob-secret")
+
+    def test_upsert_xray_client_replaces_one_identity_without_losing_other_users(self):
+        clients = [
+            {"id": "old", "email": "alice"},
+            {"id": "bob-id", "email": "bob"},
+            {"id": "duplicate-old", "email": "alice"},
+        ]
+        updated = services._upsert_xray_client(clients, {"id": "new", "email": "alice"})
+        self.assertEqual(updated, [
+            {"id": "new", "email": "alice"},
+            {"id": "bob-id", "email": "bob"},
+        ])
+
     def test_trojan_path_change_refreshes_existing_manager_inbound(self):
         config = {"inbounds": [{
             "tag": "kennet-trojan-ws", "protocol": "trojan", "listen": "127.0.0.1",

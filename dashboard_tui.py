@@ -80,6 +80,7 @@ RGB = {
     "fill_blue": (30, 48, 70), "fill_green": (28, 55, 49),
     "fill_selected": (41, 70, 100),
     "fill_banner": (231, 158, 48), "fill_header": (31, 48, 70),
+    "fill_brand": (15, 150, 156),
 }
 CARD_FILLS = ("fill_blue", "fill_blue", "fill_blue", "fill_blue")
 SPARK = "▁▂▃▄▅▆▇█"
@@ -361,10 +362,11 @@ class Dashboard:
                         "fill_blue": curses.COLOR_BLACK, "fill_green": curses.COLOR_BLACK,
                         "fill_selected": curses.COLOR_BLUE,
                         "fill_banner": curses.COLOR_YELLOW, "fill_header": curses.COLOR_BLUE,
+                        "fill_brand": curses.COLOR_CYAN,
                     }.get(name, curses.COLOR_WHITE)
                     if idx < curses.COLOR_PAIRS:
                         if name.startswith("fill_"):
-                            foreground = (curses.COLOR_BLACK if name == "fill_banner" else
+                            foreground = (curses.COLOR_BLACK if name in {"fill_banner", "fill_brand"} else
                                           _xterm_index(RGB["text"]) if curses.COLORS >= 256 else curses.COLOR_WHITE)
                             background = color
                         else:
@@ -413,16 +415,49 @@ class Dashboard:
 
     def _header(self, width: int) -> None:
         title = f"KEN-NET  •  SERVER MANAGEMENT PANEL  v{_release_version()}"
-        if self.ascii:
-            self.put(0, 2, "[●] UBUNTU", "amber", bold=True)
-            self.put(0, max(15, (width - len(title)) // 2), title, "text", bold=True)
-        else:
-            self.put(0, 2, "◉ UBUNTU", "amber", bold=True)
-            self.put(0, max(15, (width - len(title)) // 2), title, "text", bold=True)
+        bar_x, bar_width = 1, width - 2
+        self.put(0, bar_x, " " * bar_width, "fill_brand", width=bar_width)
+        ubuntu = "[●] UBUNTU" if self.ascii else "◉ UBUNTU"
+        self.put(0, 2, ubuntu, "fill_brand", bold=True, width=14)
+        title_x = max(18, (width - len(title)) // 2)
+        self.put(0, title_x, title, "fill_brand", bold=True,
+                 width=max(8, width - title_x - 3))
         os_name = str(self.snapshot.get("os", "Ubuntu"))
         self.put(1, 1, os_name, "dim", width=max(16, width // 2))
         domain = str(self.snapshot.get("domain", "—"))
         self.put(1, max(1, width - len(domain) - 3), domain, "rose", bold=True)
+
+    def _server_details(self, y: int, width: int, summary_width: int = 62) -> None:
+        """Show a compact live host inventory alongside the account summary."""
+        x = summary_width + 3
+        pane_width = width - x - 1
+        if pane_width < 28:
+            return
+        self._box(y, x, 9, pane_width, "SERVER DETAILS", "mint")
+        try:
+            disk = shutil.disk_usage("/")
+            disk_total = f"{disk.total // (1024 ** 3)} GB"
+            disk_free = f"{disk.free // (1024 ** 3)} GB free"
+        except OSError:
+            disk_total, disk_free = "unknown", "unknown"
+        try:
+            os_info = platform.freedesktop_os_release()
+            os_name = f"{os_info.get('NAME', 'Linux')} {os_info.get('VERSION_ID', '')}".strip()
+        except (AttributeError, OSError):
+            os_name = str(self.snapshot.get("os", "Linux"))
+        cpu = platform.processor() or platform.machine() or "unknown"
+        details = (
+            ("OS", os_name),
+            ("KERNEL", platform.release()),
+            ("ARCH", platform.machine() or "unknown"),
+            ("CPU", f"{os.cpu_count() or 1} cores · {cpu}"),
+            ("MEMORY", f"{self.snapshot.get('ram', '—')}% used"),
+            ("DISK", f"{disk_total} · {disk_free}"),
+            ("HOST", platform.node() or "unknown"),
+        )
+        for line, (label, value) in enumerate(details, 1):
+            self.put(y + line, x + 2, label, "dim", bold=True, width=9)
+            self.put(y + line, x + 12, value, "text", width=pane_width - 14)
 
     def _metric_line(self, width: int) -> None:
         items = (("LOAD", self.snapshot.get("load")), ("RAM", self.snapshot.get("ram")),
@@ -1212,6 +1247,8 @@ class Dashboard:
         self._metric_line(width)
         detailed_summary = height >= 44
         self._summary(4, width, detailed=detailed_summary)
+        if detailed_summary:
+            self._server_details(4, width)
         # Six double-column cards need 18 rows; reserve two rows for tools and
         # three for the footer before switching to the condensed presentation.
         compact = height < 44
