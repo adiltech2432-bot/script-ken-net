@@ -186,13 +186,16 @@ bob 122 sshd: bob@notty
             self.assertEqual(services._prompt_ssh_password(), "1234")
         prompt.assert_called_once_with("Password (input hidden): ")
 
-    def test_xray_installer_validates_and_starts_service(self):
+    def test_xray_installer_validates_and_activates_service(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(services, "XRAY_CONFIG", __import__("pathlib").Path(temp) / "config.json"), \
              patch("builtins.input", return_value="YES"), patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
              patch.object(services, "_run") as run, patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as subprocess_run:
             services.xray_install()
         self.assertTrue(any(call.args[0] == ["systemctl", "enable", "xray"] for call in run.mock_calls))
-        self.assertTrue(any(call.args[0] == ["systemctl", "start", "xray"] for call in run.mock_calls))
+        # Creating the loopback-only stats API changes Xray's config, so the
+        # installer must restart the daemon to load it (restart also starts a
+        # stopped unit).
+        self.assertTrue(any(call.args[0] == ["systemctl", "restart", "xray"] for call in run.mock_calls))
         self.assertIn("-test", subprocess_run.call_args_list[0].args[0])
 
     def test_xray_installer_repairs_empty_outbounds_and_restarts_service(self):
@@ -207,8 +210,14 @@ bob 122 sshd: bob@notty
             services.xray_install()
             saved = json.loads(services.XRAY_CONFIG.read_text())
 
-        self.assertEqual(saved["outbounds"], [{"protocol": "freedom", "tag": "direct"}])
-        self.assertEqual(saved["inbounds"], initial["inbounds"])
+        self.assertEqual(saved["outbounds"], [
+            {"protocol": "freedom", "tag": "direct"},
+            {"tag": "api", "protocol": "api"},
+        ])
+        self.assertEqual(saved["inbounds"][0], initial["inbounds"][0])
+        api_inbound = next(item for item in saved["inbounds"] if item.get("tag") == "kennet-api")
+        self.assertEqual(api_inbound["listen"], "127.0.0.1")
+        self.assertEqual(api_inbound["protocol"], "dokodemo-door")
         self.assertIn(["systemctl", "restart", "xray"], [call.args[0] for call in run.mock_calls])
 
     def test_default_outbound_repair_preserves_existing_custom_outbounds(self):
