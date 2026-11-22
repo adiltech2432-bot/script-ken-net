@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import struct
 import unittest
@@ -76,7 +77,34 @@ class GatewayRenderingTests(unittest.TestCase):
         self.assertIn("global\n    daemon", twice)
 
 
+class LoopbackBindFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporary_bind_conflict_retries_then_skips_environmental_integration_test(self):
+        probe = WebSocketTunnelTests("test_http_custom_acl_payload_tunnels_raw_ssh_bytes")
+        with patch("test_gateway_manager.asyncio.start_server",
+                   side_effect=OSError(errno.EADDRINUSE, "temporary port unavailable")) as start:
+            with self.assertRaises(unittest.SkipTest):
+                await probe._start_loopback_server(lambda _reader, _writer: None)
+        self.assertEqual(start.call_count, 3)
+
+
 class WebSocketTunnelTests(unittest.IsolatedAsyncioTestCase):
+    LOOPBACK_BIND_ERRNOS = {
+        errno.EADDRINUSE, errno.EADDRNOTAVAIL, errno.EACCES, errno.EPERM,
+        errno.EMFILE, errno.ENFILE, errno.ENOBUFS,
+    }
+
+    async def _start_loopback_server(self, handler):
+        last_error = None
+        for _attempt in range(3):
+            try:
+                return await asyncio.start_server(handler, "127.0.0.1", 0)
+            except OSError as exc:
+                if exc.errno not in self.LOOPBACK_BIND_ERRNOS:
+                    raise
+                last_error = exc
+                await asyncio.sleep(0.05)
+        self.skipTest(f"temporary loopback sockets unavailable: {last_error}")
+
     async def asyncSetUp(self):
         async def echo(reader, writer):
             try:
@@ -86,18 +114,29 @@ class WebSocketTunnelTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 writer.close()
                 await writer.wait_closed()
-        self.backend = await asyncio.start_server(echo, "127.0.0.1", 0)
-        self.backend_port = self.backend.sockets[0].getsockname()[1]
+        self.backend = None
+        self.bridge = None
+        try:
+            self.backend = await self._start_loopback_server(echo)
+            self.backend_port = self.backend.sockets[0].getsockname()[1]
+            self.bridge = await self._start_loopback_server(websocket_tunnel.handle)
+        except BaseException:
+            for server in (self.bridge, self.backend):
+                if server is not None:
+                    server.close()
+                    await server.wait_closed()
+            raise
         self.target_patch = patch.object(websocket_tunnel, "TARGETS", {self.backend_port})
         self.path_patch = patch.dict(websocket_tunnel.PATH_TARGETS, {"/test": self.backend_port})
         self.legacy_patch = patch.object(websocket_tunnel, "LEGACY_ACL_BACKEND_PORT", self.backend_port)
         self.target_patch.start(); self.path_patch.start(); self.legacy_patch.start()
-        self.bridge = await asyncio.start_server(websocket_tunnel.handle, "127.0.0.1", 0)
         self.bridge_port = self.bridge.sockets[0].getsockname()[1]
 
     async def asyncTearDown(self):
-        self.bridge.close(); self.backend.close()
-        await self.bridge.wait_closed(); await self.backend.wait_closed()
+        for server in (self.bridge, self.backend):
+            if server is not None:
+                server.close()
+                await server.wait_closed()
         self.target_patch.stop(); self.path_patch.stop(); self.legacy_patch.stop()
 
     async def test_http_custom_acl_payload_tunnels_raw_ssh_bytes(self):
