@@ -318,6 +318,20 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         self.assertIn("-all", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["timeout"], 2)
 
+    def test_xray_online_ip_counts_treats_empty_xray_response_as_zero(self):
+        config = {"inbounds": [{"tag": "kennet-api", "port": 10085}]}
+        command = SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+        with patch.object(services, "get_xray_config", return_value=config), \
+             patch.object(services, "xray_list", return_value=["alice", "bob"]), \
+             patch.object(services.subprocess, "run", return_value=command):
+            services._xray_online_ip_cache = None
+            try:
+                counts = services.xray_online_ip_counts("trojan")
+            finally:
+                services._xray_online_ip_cache = None
+
+        self.assertEqual(counts, {"alice": 0, "bob": 0})
+
     def test_xray_dashboard_stats_refresh_does_not_block_caller(self):
         import threading
         import time as wall_time

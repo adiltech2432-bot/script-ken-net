@@ -910,6 +910,10 @@ def xray_online_ip_counts(protocol: str) -> dict[str, int]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Xray online statistics returned unreadable data") from exc
     online_users = payload.get("users") if isinstance(payload, dict) else None
+    # Xray's API serializes an empty users list as `{}`. That is a valid
+    # no-connections result; treat it as zero for every managed account.
+    if online_users is None and payload == {}:
+        online_users = []
     if not isinstance(online_users, list):
         raise RuntimeError("Xray all-users response did not contain a users list")
 
