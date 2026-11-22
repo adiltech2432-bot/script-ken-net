@@ -776,37 +776,36 @@ def _ensure_xray_online_stats(cfg: dict) -> bool:
         changed = True
     api_port = int(api_inbound["port"])
     api_tag = str(api_inbound.get("tag", "kennet-api"))
-    if api.get("tag") != api_tag:
-        api["tag"] = api_tag
-        changed = True
 
-    # Xray requires an API outbound and a routing rule to deliver API calls to it.
+    # Xray creates the API outbound internally using api.tag. Routing the API
+    # inbound to a regular freedom outbound sends the API request back through
+    # the same inbound and creates a tight loop (and makes StatsService unusable).
     outbounds = cfg.setdefault("outbounds", [])
     if not isinstance(outbounds, list):
         outbounds = []
         cfg["outbounds"] = outbounds
         changed = True
-    # The API is exposed by cfg["api"] and routed to a normal outbound. Xray
-    # has no outbound protocol named "api"; old panel builds wrote that invalid
-    # protocol and caused Xray to reject the entire config on account creation.
-    api_outbound = next((item for item in outbounds
-                         if isinstance(item, dict) and item.get("tag") == "api"), None)
-    if api_outbound is not None and api_outbound.get("protocol") == "api":
-        api_outbound["protocol"] = "freedom"
-        api_outbound.pop("settings", None)
+    # Older panel builds wrote an explicit outbound with protocol "api".
+    # Xray's API outbound is generated from cfg["api"]; the protocol is not valid.
+    valid_outbounds = [item for item in outbounds
+                       if not (isinstance(item, dict) and item.get("protocol") == "api")]
+    if len(valid_outbounds) != len(outbounds):
+        outbounds[:] = valid_outbounds
         changed = True
-    if api_outbound is None:
-        api_outbound_tag = "api"
-        if any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
-            api_outbound_tag = "kennet-api-outbound"
-            suffix = 1
-            while any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
-                suffix += 1
-                api_outbound_tag = f"kennet-api-outbound-{suffix}"
-        api_outbound = {"tag": api_outbound_tag, "protocol": "freedom"}
-        outbounds.append(api_outbound)
+
+    api_service_tag = str(api.get("tag") or api_tag).strip() or api_tag
+    outbound_tags = {str(item.get("tag")) for item in outbounds
+                     if isinstance(item, dict) and item.get("tag")}
+    if api_service_tag in outbound_tags:
+        base_tag = "kennet-api-service"
+        api_service_tag = base_tag
+        suffix = 1
+        while api_service_tag in outbound_tags:
+            suffix += 1
+            api_service_tag = f"{base_tag}-{suffix}"
+    if api.get("tag") != api_service_tag:
+        api["tag"] = api_service_tag
         changed = True
-    api_outbound_tag = str(api_outbound.get("tag", "api"))
 
     routing = cfg.setdefault("routing", {})
     if not isinstance(routing, dict):
@@ -818,9 +817,24 @@ def _ensure_xray_online_stats(cfg: dict) -> bool:
         rules = []
         routing["rules"] = rules
         changed = True
-    api_rule = {"type": "field", "inboundTag": [api_tag], "outboundTag": api_outbound_tag}
-    if api_rule not in rules:
-        rules.insert(0, api_rule)
+
+    # Replace stale API-inbound routes instead of leaving a higher-priority
+    # freedom route in front of the correct internal API outbound.
+    other_rules = []
+    for rule in rules:
+        inbound_tags = rule.get("inboundTag") if isinstance(rule, dict) else None
+        if not isinstance(inbound_tags, list) or api_tag not in inbound_tags:
+            other_rules.append(rule)
+            continue
+        remaining_tags = [tag for tag in inbound_tags if tag != api_tag]
+        if remaining_tags:
+            preserved_rule = dict(rule)
+            preserved_rule["inboundTag"] = remaining_tags
+            other_rules.append(preserved_rule)
+    api_rule = {"type": "field", "inboundTag": [api_tag], "outboundTag": api_service_tag}
+    new_rules = [api_rule, *other_rules]
+    if new_rules != rules:
+        rules[:] = new_rules
         changed = True
 
     policy = cfg.setdefault("policy", {})

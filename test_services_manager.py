@@ -227,14 +227,13 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
             services.xray_install()
             saved = json.loads(services.XRAY_CONFIG.read_text())
 
-        self.assertEqual(saved["outbounds"], [
-            {"protocol": "freedom", "tag": "direct"},
-            {"tag": "api", "protocol": "freedom"},
-        ])
+        self.assertEqual(saved["outbounds"], [{"protocol": "freedom", "tag": "direct"}])
         self.assertEqual(saved["inbounds"][0], initial["inbounds"][0])
         api_inbound = next(item for item in saved["inbounds"] if item.get("tag") == "kennet-api")
         self.assertEqual(api_inbound["listen"], "127.0.0.1")
         self.assertEqual(api_inbound["protocol"], "dokodemo-door")
+        self.assertEqual(saved["api"]["tag"], "kennet-api")
+        self.assertEqual(saved["routing"]["rules"][0]["outboundTag"], saved["api"]["tag"])
         self.assertIn(["systemctl", "restart", "xray"], [call.args[0] for call in run.mock_calls])
 
     def test_xray_stats_repairs_legacy_invalid_api_outbound_idempotently(self):
@@ -246,8 +245,40 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         }
 
         self.assertTrue(services._ensure_xray_online_stats(config))
-        self.assertEqual(config["outbounds"][0], {"tag": "api", "protocol": "freedom"})
+        self.assertEqual(config["outbounds"], [{"tag": "direct", "protocol": "freedom"}])
+        self.assertEqual(config["api"]["tag"], "api")
+        self.assertEqual(config["routing"]["rules"][0]["outboundTag"], config["api"]["tag"])
         self.assertFalse(any(item.get("protocol") == "api" for item in config["outbounds"]))
+        self.assertFalse(services._ensure_xray_online_stats(config))
+
+    def test_xray_stats_repairs_freedom_api_loop_without_restarting_to_itself(self):
+        config = {
+            "api": {"tag": "kennet-api", "services": ["StatsService"]},
+            "inbounds": [{"tag": "kennet-api", "protocol": "dokodemo-door", "listen": "127.0.0.1",
+                          "port": 10086, "settings": {"address": "127.0.0.1"}}],
+            "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "api", "protocol": "freedom"}],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["kennet-api"], "outboundTag": "api"}]},
+        }
+
+        self.assertTrue(services._ensure_xray_online_stats(config))
+        self.assertEqual(config["routing"]["rules"][0]["outboundTag"], "kennet-api")
+        self.assertFalse(any(item.get("tag") == config["api"]["tag"] for item in config["outbounds"]))
+        self.assertFalse(services._ensure_xray_online_stats(config))
+
+    def test_xray_stats_avoids_api_tag_collision_and_preserves_custom_outbound(self):
+        custom = {"tag": "kennet-api", "protocol": "socks", "settings": {"servers": []}}
+        config = {
+            "api": {"tag": "kennet-api", "services": ["StatsService"]},
+            "inbounds": [{"tag": "kennet-api-in", "protocol": "dokodemo-door", "listen": "127.0.0.1",
+                          "port": 10086, "settings": {"address": "127.0.0.1"}}],
+            "outbounds": [{"tag": "direct", "protocol": "freedom"}, custom.copy()],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["kennet-api-in"], "outboundTag": "kennet-api"}]},
+        }
+
+        self.assertTrue(services._ensure_xray_online_stats(config))
+        self.assertEqual(config["outbounds"][1], custom)
+        self.assertEqual(config["api"]["tag"], "kennet-api-service")
+        self.assertEqual(config["routing"]["rules"][0]["outboundTag"], "kennet-api-service")
         self.assertFalse(services._ensure_xray_online_stats(config))
 
     def test_xray_add_normalizes_display_protocol_and_username_before_validation(self):
@@ -348,6 +379,8 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         self.assertEqual([inbound["tag"] for inbound in fresh_config["inbounds"]], ["kennet-api"])
         self.assertTrue(all(item["protocol"] != "api" for item in fresh_config["outbounds"]))
         self.assertEqual(fresh_config["api"]["services"], ["StatsService"])
+        self.assertEqual(fresh_config["routing"]["rules"][0]["outboundTag"], fresh_config["api"]["tag"])
+        self.assertFalse(any(item.get("tag") == fresh_config["api"]["tag"] for item in fresh_config["outbounds"]))
         self.assertTrue(fresh_config["policy"]["levels"]["0"]["statsUserOnline"])
         self.assertTrue(any(call.args[0] == ["systemctl", "restart", "xray"] for call in run.mock_calls))
 
