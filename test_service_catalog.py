@@ -1,4 +1,8 @@
+import io
 import unittest
+from contextlib import redirect_stdout
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import service_catalog
 
@@ -22,6 +26,39 @@ class ServiceCatalogTests(unittest.TestCase):
     def test_shared_ports_are_explicitly_flagged(self):
         self.assertIn(("tcp", 443), service_catalog.conflicts())
         self.assertIn(("tcp", 80), service_catalog.conflicts())
+
+    @patch("service_catalog.shutil.which", return_value="/usr/bin/ss")
+    @patch("service_catalog.subprocess.run")
+    def test_live_listener_parser_reads_ipv4_ipv6_tcp_and_udp(self, run, _which):
+        run.return_value = CompletedProcess([], 0,
+            "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n"
+            "tcp LISTEN 0 4096 [::]:443 [::]:*\n"
+            "udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:*\n", "")
+
+        self.assertEqual(service_catalog.listening_ports(),
+                         {("tcp", 22), ("tcp", 443), ("udp", 53)})
+        run.assert_called_once_with(["/usr/bin/ss", "-H", "-lntu"], capture_output=True,
+                                    text=True, check=False, timeout=5)
+
+    def test_live_port_report_distinguishes_listening_partial_and_range_plans(self):
+        output = io.StringIO()
+        live = {("tcp", 22), ("tcp", 443)}
+        with patch.object(service_catalog, "listening_ports", return_value=live), \
+             redirect_stdout(output):
+            service_catalog.show()
+
+        rendered = output.getvalue()
+        self.assertIn("LISTENING", rendered)
+        self.assertIn("OpenSSH", rendered)
+        self.assertIn("PARTIAL", rendered)
+        self.assertIn("OpenVPN TCP", rendered)
+        self.assertIn("RANGE PLAN", rendered)
+        self.assertIn("provider firewall", rendered)
+
+    @patch("service_catalog.shutil.which", return_value=None)
+    def test_live_port_probe_explains_missing_ss_tool(self, _which):
+        with self.assertRaisesRegex(RuntimeError, "iproute2"):
+            service_catalog.listening_ports()
 
 
 if __name__ == "__main__":

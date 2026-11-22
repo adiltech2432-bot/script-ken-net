@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
+import terminal_ui
+
 SERVICES = (
     ("OpenSSH", "tcp", (22,), "Direct SSH login and SSH account backend"),
     ("UDP Custom", "udp", (1, 65535), "ePro UDP-Custom DNAT range; excludes UDP/53, UDP/2200 and the configured WireGuard port"),
@@ -26,6 +31,30 @@ SERVICES = (
 )
 
 
+def listening_ports() -> set[tuple[str, int]]:
+    """Read the live TCP/UDP listener table from the local host."""
+    ss = shutil.which("ss")
+    if not ss:
+        raise RuntimeError("The ss command is unavailable; install iproute2 to inspect live listeners")
+    result = subprocess.run([ss, "-H", "-lntu"], capture_output=True, text=True,
+                            check=False, timeout=5)
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "Could not read live listeners").strip())
+
+    listeners: set[tuple[str, int]] = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0].lower() not in {"tcp", "udp"}:
+            continue
+        try:
+            port = int(fields[4].rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if 1 <= port <= 65535:
+            listeners.add((fields[0].lower(), port))
+    return listeners
+
+
 def port_owners() -> dict[tuple[str, int], list[str]]:
     owners: dict[tuple[str, int], list[str]] = {}
     for name, proto, ports, _ in SERVICES:
@@ -41,13 +70,31 @@ def conflicts() -> dict[tuple[str, int], list[str]]:
 
 
 def show() -> None:
-    print("\nImplemented service and port plan")
+    live = listening_ports()
+    print("\nLIVE SOCKET / PORT REPORT")
+    print(f"{terminal_ui.CYAN}{'SOCKET':<14} {'SERVICE':<34} {'PROTO':<6} PORTS{terminal_ui.RESET}")
     for name, proto, ports, note in SERVICES:
         ports_text = "1–65535 (with listed exclusions)" if name == "UDP Custom" else ", ".join(map(str, ports))
-        print(f"- {name:<34} {proto.upper():<4} {ports_text:<30} {note}")
+        if name == "UDP Custom":
+            state, color = "RANGE PLAN", terminal_ui.YELLOW
+            observed_text = "NAT-managed range; listener check is not applicable"
+        else:
+            observed = [port for port in ports if (proto, port) in live]
+            if len(observed) == len(ports):
+                state, color = "LISTENING", terminal_ui.GREEN
+            elif observed:
+                state, color = "PARTIAL", terminal_ui.YELLOW
+            else:
+                state, color = "NOT LISTENING", terminal_ui.MAGENTA
+            actual = ", ".join(str(port) for port in observed) or "none"
+            missing = [port for port in ports if port not in observed]
+            observed_text = f"live {actual}" + (f"; missing {', '.join(map(str, missing))}" if missing else "")
+        print(f"{color}{state:<14}{terminal_ui.RESET} {name:<34} {proto.upper():<6} {ports_text}")
+        print(f"  {terminal_ui.BLUE}{observed_text}{terminal_ui.RESET}  {note}")
     shared = conflicts()
     if shared:
         print("\nIntentional shared listeners are routed by HAProxy/Nginx/WebSocket path:")
         for (proto, port), owners in sorted(shared.items()):
             print(f"- {proto.upper()}/{port}: {', '.join(dict.fromkeys(owners))}")
-    print("\nUDP-Custom's range must exclude UDP/53, UDP/2200 and the configured WireGuard port. Provider firewall rules are separate.")
+    print("\nA listening socket does not prove backend health or public reachability; check the provider firewall separately.")
+    print("UDP-Custom's range must exclude UDP/53, UDP/2200 and the configured WireGuard port.")

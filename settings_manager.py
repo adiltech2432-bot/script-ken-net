@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,9 @@ RESTART_UNITS = (
 )
 SSH_BANNER = Path("/etc/issue.net")
 SSH_BANNER_CONFIG = Path("/etc/ssh/sshd_config.d/99-kennet-banner.conf")
+WS_RESPONSE_CONFIG = Path("/etc/kennet-panel/websocket-response.json")
+DEFAULT_WS_RESPONSE_BANNER = "KEN-NET"
+WS_RESPONSE_BANNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$")
 
 
 def _run(args: list[str]) -> str:
@@ -50,6 +54,7 @@ def restart_services() -> None:
             failures.append(f"{unit}: {(result.stderr or result.stdout).strip()}")
     if failures:
         print("Some services could not be restarted:\n  " + "\n  ".join(failures))
+        raise RuntimeError(f"{len(failures)} managed service(s) failed to restart")
     else:
         print(f"Restarted {len(active)} active managed services.")
 
@@ -180,9 +185,10 @@ def speed_test() -> None:
     if Path(command).name == "speedtest":
         args.extend(["--accept-license", "--accept-gdpr"])
     result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
-    print(result.stdout or result.stderr or "Speed test completed without output.")
     if result.returncode:
-        print(f"Speed test exited with status {result.returncode}.")
+        raise RuntimeError((result.stderr or result.stdout or
+                            f"Speed test exited with status {result.returncode}.").strip())
+    print(result.stdout or "Speed test completed without output.")
 
 
 def restart_or_reboot() -> None:
@@ -195,10 +201,40 @@ def restart_or_reboot() -> None:
             _run(["systemctl", "reboot"])
         else:
             print("Cancelled.")
+    elif choice != "0":
+        print("Invalid selection. Choose 1, 2, or 0.")
 
 
 def change_ws_response() -> None:
-    print("WebSocket handshakes use the RFC 6455 response required by clients. The status text is not customizable because changing it would break compliant clients.")
+    import websocket_tunnel
+    current = websocket_tunnel.response_banner()
+    terminal_ui.detail_card("WEBSOCKET RESPONSE BANNER", [
+        ("Required handshake", "101 Switching Protocols"),
+        ("Current KEN-NET banner", current),
+    ], note="The 101 status is required by WebSocket clients. This setting changes only the optional X-KEN-NET-Banner header and applies to new handshakes without restarting the bridge.", color=terminal_ui.BLUE)
+    value = input("New response banner [Enter keeps current; DEFAULT resets]: ").strip()
+    if not value:
+        print("No change made.")
+        return
+    if value.upper() == "DEFAULT":
+        value = DEFAULT_WS_RESPONSE_BANNER
+    if not WS_RESPONSE_BANNER_RE.fullmatch(value):
+        raise ValueError("Use 1–64 letters, numbers, spaces, dots, underscores, slashes, or hyphens")
+
+    WS_RESPONSE_CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    fd, temporary = tempfile.mkstemp(prefix=".websocket-response.", dir=str(WS_RESPONSE_CONFIG.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"banner": value}, handle)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, WS_RESPONSE_CONFIG)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    print(f"WebSocket response banner saved: {value}. It applies to new connections immediately.")
 
 
 def menu() -> None:
@@ -206,23 +242,24 @@ def menu() -> None:
         print("System settings require root. Start the panel with sudo.")
         return
     actions = {
-        "1": ("Check running system", lambda: __import__("panel").show_status()),
-        "2": ("Information port", lambda: __import__("service_catalog").show()),
-        "3": ("Restart all managed services", restart_services),
-        "4": ("Change server domain", change_domain),
-        "5": ("Change DNSTT nameserver", change_nameserver),
-        "6": ("Rotate DNSTT Pub/Priv key", rotate_dnstt_keys),
-        "7": ("Change SSH banner", change_banner),
-        "8": ("VPS speed test", speed_test),
-        "9": ("Change WebSocket response", change_ws_response),
-        "10": ("Restart / reboot server", restart_or_reboot),
+        "1": ("◉  Check running system", lambda: __import__("panel").show_status()),
+        "2": ("▤  Live port status", lambda: __import__("service_catalog").show()),
+        "3": ("↻  Restart managed services", restart_services),
+        "4": ("◎  Change server domain", change_domain),
+        "5": ("⌁  Change DNSTT nameserver", change_nameserver),
+        "6": ("⚿  Rotate DNSTT keys", rotate_dnstt_keys),
+        "7": ("▣  Change SSH banner", change_banner),
+        "8": ("↗  VPS network speed test", speed_test),
+        "9": ("≋  WebSocket response banner", change_ws_response),
+        "10": ("⏻  Server restart / reboot", restart_or_reboot),
     }
     while True:
         terminal_ui.option_cards(
             "SYSTEM SETTINGS",
-            [(key, label) for key, (label, _) in actions.items()] + [("0", "Exit settings")],
-            columns=2, color=terminal_ui.YELLOW,
+            [(key, label) for key, (label, _) in actions.items()] + [("0", "←  Back to dashboard")],
+            columns=2, color=terminal_ui.YELLOW, colorful=True,
         )
+        print(f"\n{terminal_ui.BLUE}Enter a card number to open | 0 returns to the dashboard{terminal_ui.RESET}")
         choice = input("Select setting [0-10]: ").strip()
         if choice == "0":
             return
@@ -240,6 +277,6 @@ def menu() -> None:
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
             print(f"Operation failed: {exc}")
         if succeeded:
-            print("\nAction finished. Review the output above.")
+            print("\nReturned from this setting. Review the result above.")
         input("\nPress Enter to return to System Settings...")
 

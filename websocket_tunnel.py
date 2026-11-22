@@ -7,7 +7,10 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import json
+import re
 import struct
+from pathlib import Path
 from urllib.parse import urlsplit
 
 MAX_HEADER = 16 * 1024
@@ -17,6 +20,30 @@ PATH_TARGETS = {"/": 22, "/ssh-ws": 22, "/dropbear-ws": 2109, "/openvpn-ws": 119
 LEGACY_PORTS = {22: 22, 109: 2109, 143: 143, 1194: 1194}
 LEGACY_ACL_BACKEND_PORT = 22
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_RESPONSE_CONFIG = Path("/etc/kennet-panel/websocket-response.json")
+DEFAULT_RESPONSE_BANNER = "KEN-NET"
+RESPONSE_BANNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$")
+
+
+def response_banner() -> str:
+    """Read a safe optional response banner; invalid config falls back harmlessly."""
+    try:
+        config = json.loads(WS_RESPONSE_CONFIG.read_text(encoding="utf-8"))
+        value = config.get("banner", DEFAULT_RESPONSE_BANNER) if isinstance(config, dict) else ""
+        if isinstance(value, str) and RESPONSE_BANNER_RE.fullmatch(value.strip()):
+            return value.strip()
+    except (OSError, ValueError, TypeError):
+        pass
+    return DEFAULT_RESPONSE_BANNER
+
+
+def switching_protocols_response(accept: str | None = None) -> bytes:
+    """Build a compliant 101 response with the configurable safe KEN-NET banner."""
+    lines = ["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade",
+             f"X-KEN-NET-Banner: {response_banner()}"]
+    if accept is not None:
+        lines.append(f"Sec-WebSocket-Accept: {accept}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
 
 
 def target_port(path: str, headers: dict[str, str]) -> int:
@@ -126,8 +153,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 return
             backend_reader, backend = await asyncio.wait_for(
                 asyncio.open_connection("127.0.0.1", LEGACY_ACL_BACKEND_PORT), timeout=5)
-            writer.write(b"HTTP/1.1 101 Switching Protocols\r\n"
-                         b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            writer.write(switching_protocols_response())
             await writer.drain()
             await _relay_raw(reader, writer, backend_reader, backend)
             return
@@ -157,9 +183,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         backend_reader, backend = await asyncio.wait_for(
             asyncio.open_connection("127.0.0.1", port), timeout=5)
         accept = base64.b64encode(hashlib.sha1((key + GUID).encode("ascii")).digest()).decode("ascii")
-        writer.write(("HTTP/1.1 101 Switching Protocols\r\n"
-                      "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                      f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode("ascii"))
+        writer.write(switching_protocols_response(accept))
         await writer.drain()
         async def tcp_to_ws() -> None:
             while data := await backend_reader.read(65536):

@@ -2,7 +2,7 @@
 
 An editable English terminal manager for Ubuntu 24.04. The default home screen is a keyboard-driven colored dashboard with live system metrics, domain, protocol status, listener ports, and account counts. The presentation layer opens the existing protocol managers, so account and service operations continue to use the same backend logic. Protocol numbers retain the original menu IDs even though the dashboard groups cards by service type.
 
-The **System settings** cards include running-service status, the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing, VPS speed test, WebSocket capability status, and confirmed VPS reboot.
+The **System settings** cards include running-service status, live TCP/UDP listener checks against the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing, VPS speed test, a safe optional `X-KEN-NET-Banner` WebSocket response header (while retaining the required `101 Switching Protocols` status), and confirmed VPS reboot.
 
 ## Managed features
 
