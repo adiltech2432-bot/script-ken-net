@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import terminal_ui
@@ -222,14 +223,23 @@ def change_ws_response() -> None:
         ("Required handshake", "101 Switching Protocols"),
         ("Current KEN-NET banner", current),
     ], note="The 101 status is required by WebSocket clients. This setting changes only the optional X-KEN-NET-Banner header and applies to new handshakes without restarting the bridge.", color=terminal_ui.BLUE)
-    value = input("New response banner [Enter keeps current; DEFAULT resets]: ").strip()
+    value = input("New response banner [Enter keeps current; DEFAULT resets]: ")
+    value = unicodedata.normalize("NFKC", value)
+    value = "".join("-" if unicodedata.category(char) == "Pd" or char == "\u2212" else char
+                    for char in value).strip()
     if not value:
         print("No change made.")
         return
     if value.upper() == "DEFAULT":
         value = DEFAULT_WS_RESPONSE_BANNER
     if not WS_RESPONSE_BANNER_RE.fullmatch(value):
-        raise ValueError("Use 1–64 letters, numbers, spaces, dots, underscores, slashes, or hyphens")
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ._/-")
+        invalid = list(dict.fromkeys(
+            f"U+{ord(char):04X}" for index, char in enumerate(value)
+            if char not in allowed or (index == 0 and not (char.isascii() and char.isalnum()))
+        ))
+        detail = f" Unsupported character code(s): {', '.join(invalid)}." if invalid else ""
+        raise ValueError("Use 1–64 letters, numbers, spaces, dots, underscores, slashes, or hyphens." + detail)
 
     WS_RESPONSE_CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     fd, temporary = tempfile.mkstemp(prefix=".websocket-response.", dir=str(WS_RESPONSE_CONFIG.parent))

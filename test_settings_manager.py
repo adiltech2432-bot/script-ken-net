@@ -250,6 +250,18 @@ class SettingsMenuTests(unittest.TestCase):
                 self.assertIn(b"X-KEN-NET-Banner: KEN-NET Gateway 2", response)
                 self.assertIn(b"Sec-WebSocket-Accept: accept-token", response)
 
+    def test_websocket_response_normalizes_visually_equivalent_space_and_hyphen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch("builtins.input", return_value="BY\u00a0KEN\u2011NET"):
+                settings_manager.change_ws_response()
+
+            self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
+                             {"banner": "BY KEN-NET"})
+
     def test_websocket_response_rejects_header_injection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "websocket-response.json"
@@ -257,6 +269,16 @@ class SettingsMenuTests(unittest.TestCase):
                  patch.object(terminal_ui, "detail_card"), \
                  patch("builtins.input", return_value="KEN-NET\r\nUpgrade: no"), \
                  self.assertRaisesRegex(ValueError, "1–64 letters"):
+                settings_manager.change_ws_response()
+            self.assertFalse(config.exists())
+
+    def test_websocket_response_reports_code_of_invisible_unsupported_character(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch("builtins.input", return_value="BY\u200b KEN-NET"), \
+                 self.assertRaisesRegex(ValueError, "U\\+200B"):
                 settings_manager.change_ws_response()
             self.assertFalse(config.exists())
 
