@@ -614,20 +614,16 @@ class Dashboard:
         title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         bar_x, bar_width = 1, width - 2
         self.put(0, bar_x, " " * bar_width, "fill_brand", width=bar_width)
-        ubuntu = "[●] UBUNTU" if self.ascii else "◉ UBUNTU"
-        self.put(0, 2, ubuntu, "fill_brand", bold=True, width=14)
         version = f"v{_release_version()}"
         version_x = max(2, width - len(version) - 3)
-        title_x = max(16, (width - len(title)) // 2)
-        self.put(0, title_x, title, "fill_brand", bold=True,
-                 width=max(8, version_x - title_x - 2))
+        title_x = max(2, (width - len(title)) // 2)
+        if title_x + len(title) > version_x - 2:
+            title_x = max(2, version_x - len(title) - 2)
+        title_width = min(len(title), max(0, version_x - title_x - 2))
+        self.put(0, title_x, title, "fill_brand", bold=True, width=title_width)
         self.put(0, version_x, version, "fill_brand", bold=True, width=len(version))
-        # Use the second row as a subtitle so the title reads as a deliberate
-        # brand card instead of a thin terminal label.
+        # Keep a full-height brand card while reserving its text for the title.
         self.put(1, bar_x, " " * bar_width, "fill_brand", width=bar_width)
-        subtitle = "LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES"
-        self.put(1, max(2, (width - len(subtitle)) // 2), subtitle,
-                 "fill_brand", bold=True, width=width - 4)
 
     def _server_details(self, y: int, width: int, summary_width: int = 62) -> None:
         """Show the requested host/account inventory without fabricated values."""
@@ -1767,7 +1763,7 @@ def _plain_dashboard() -> int:
         if os.isatty(1) and os.environ.get("TERM") != "dumb":
             import terminal_ui
             terminal_ui.clear_screen()
-        print("\nKEN-NET | SERVER MANAGEMENT PANEL")
+        print(f"\nKEN-NET  •  SERVER MANAGEMENT PANEL  v{_release_version()}")
         print("=" * 36)
         for group, _color, keys in GROUPS:
             print(f"\n{group}")

@@ -138,17 +138,25 @@ class DashboardDataTests(unittest.TestCase):
         self.assertIn("2 online", rendered)
 
     def test_header_uses_a_prominent_title_and_version_badge(self):
-        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
-        dashboard.ascii = False
-        calls = []
-        dashboard.put = lambda y, x, text, *args, **kwargs: calls.append((y, x, str(text), kwargs))
+        title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
+        for width in (72, 100, 160):
+            dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+            dashboard.ascii = False
+            calls = []
+            dashboard.put = lambda y, x, text, *args, **kwargs: calls.append((y, x, str(text), kwargs))
 
-        dashboard._header(100)
+            dashboard._header(width)
 
-        rendered = [item[2] for item in calls]
-        self.assertIn("KEN-NET  •  SERVER MANAGEMENT PANEL", rendered)
-        self.assertIn("v" + dashboard_tui._release_version(), rendered)
-        self.assertIn("LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES", rendered)
+            title_call = next(item for item in calls if item[2] == title)
+            version = "v" + dashboard_tui._release_version()
+            version_call = next(item for item in calls if item[2] == version)
+            rendered = [item[2] for item in calls]
+            self.assertEqual(title_call[0], version_call[0])
+            self.assertTrue(title_call[3]["bold"])
+            self.assertTrue(version_call[3]["bold"])
+            self.assertLess(title_call[1] + len(title), version_call[1])
+            self.assertNotIn("◉ UBUNTU", rendered)
+            self.assertNotIn("LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES", rendered)
 
     @patch("subprocess.run")
     def test_listener_display_checks_all_catalog_ports(self, run):
