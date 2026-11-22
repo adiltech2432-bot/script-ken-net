@@ -13,10 +13,14 @@ import platform
 import shutil
 import subprocess
 import time
+import ipaddress
 import secrets
 import getpass
 import json
 import socket
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass
@@ -86,6 +90,28 @@ RGB = {
 CARD_FILLS = ("fill_blue", "fill_blue", "fill_blue", "fill_blue")
 SPARK = "▁▂▃▄▅▆▇█"
 _activity = deque(maxlen=10)
+SERVER_GEO_CACHE_FILE = Path("/var/cache/kennet-panel/server-geolocation.json")
+SERVER_GEO_CACHE_TTL = 6 * 60 * 60
+_server_geo_lock = threading.Lock()
+_server_geo_cache: tuple[float, dict[str, str]] | None = None
+_server_geo_refreshing = False
+_server_geo_retry_at = 0.0
+
+
+def _main_grid_layout(height: int, width: int) -> dict[str, int | bool]:
+    """Fit the protocol grid and tool cards to the terminal without overlap."""
+    detailed = height >= 44 and width >= 90
+    summary_width = min(62, max(44, (width - 4) // 2)) if detailed else width - 2
+    grid_top = 16 if detailed else 10
+    columns = 2 if width >= 72 else 1
+    rows_per_column = (len(PROTOCOL_ORDER) + columns - 1) // columns
+    footer_y = height - 3
+    card_height = max(1, min(6, (footer_y - grid_top - 5) // rows_per_column))
+    grid_bottom = grid_top + 1 + rows_per_column * card_height
+    return {"detailed": detailed, "summary_width": summary_width,
+            "grid_top": grid_top, "rows_per_column": rows_per_column,
+            "footer_y": footer_y, "card_height": card_height, "grid_bottom": grid_bottom,
+            "tools_y": grid_bottom + 1}
 
 
 def _legacy_protocol_key(number: int) -> str:
@@ -194,8 +220,9 @@ def collect_rows() -> tuple[list[Row], dict[str, object]]:
     try:
         server_card = _server_info_card(domain)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-        server_card = {key: "Not configured" for key in
-                       ("expiration", "isp", "city", "ip", "nameserver", "owner")}
+        server_card = {"expiration": "Provider account required", "isp": "Unavailable",
+                       "city": "Unavailable", "ip": "Unavailable", "nameserver": "Not set",
+                       "owner": "Not exposed locally"}
 
     rows: list[Row] = []
     for group, color, keys in GROUPS:
@@ -230,23 +257,153 @@ def collect_rows() -> tuple[list[Row], dict[str, object]]:
 
 
 def _server_info_card(domain: str) -> dict[str, str]:
-    """Collect locally available server facts; never invent provider metadata."""
-    result = {"expiration": "Not configured", "isp": "Not configured", "city": "Not configured",
-              "ip": "Not configured", "nameserver": "Not configured", "owner": "Not configured"}
+    """Collect local host facts and enrich the public IP in a cached background lookup."""
+    result = {"expiration": "Provider account required", "isp": "Unavailable",
+              "city": "Unavailable", "ip": "Unavailable", "nameserver": "Not set",
+              "owner": "Not exposed locally"}
+    try:
+        import services_manager
+        state = services_manager.state()
+        metadata = state.get("server_info", {}) if isinstance(state, dict) else {}
+        if isinstance(metadata, dict):
+            result["expiration"] = str(metadata.get("expiration") or result["expiration"])
+            result["owner"] = str(metadata.get("owner") or result["owner"])
+    except (ImportError, OSError, ValueError, RuntimeError):
+        pass
     try:
         import dnstt_manager
         cfg = dnstt_manager._read_json(dnstt_manager.CONFIG, {})
-        result["nameserver"] = str(cfg.get("nameserver_host") or "Not configured")
+        result["nameserver"] = str(cfg.get("nameserver_host") or result["nameserver"])
     except (ImportError, AttributeError, OSError, ValueError, RuntimeError):
+        pass
+
+    local_ip = _local_public_ip()
+    geo, lookup_state = _server_geolocation()
+    result["ip"] = geo.get("ip") or local_ip or ("Detecting…" if lookup_state == "loading" else "Unavailable")
+    result["isp"] = geo.get("isp") or _server_provider() or ("Detecting…" if lookup_state == "loading" else "Unavailable")
+    result["city"] = geo.get("city") or ("Detecting…" if lookup_state == "loading" else "Unavailable")
+    return result
+
+
+def _parse_server_geolocation(payload: object) -> dict[str, str]:
+    """Validate the small public-IP lookup response before caching its display fields."""
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return {}
+    try:
+        address = ipaddress.ip_address(str(payload.get("ip", "")).strip())
+    except ValueError:
+        return {}
+    if not address.is_global:
+        return {}
+    connection = payload.get("connection")
+    connection = connection if isinstance(connection, dict) else {}
+    city = str(payload.get("city") or "").strip()
+    isp = str(connection.get("isp") or connection.get("org") or "").strip()
+    return {"ip": address.compressed, "city": city[:80], "isp": isp[:100]}
+
+
+def _server_geolocation() -> tuple[dict[str, str], str]:
+    """Return cached public-IP facts immediately and refresh them off the UI thread."""
+    global _server_geo_cache, _server_geo_refreshing, _server_geo_retry_at
+    now = time.time()
+    monotonic_now = time.monotonic()
+    with _server_geo_lock:
+        if _server_geo_cache is None:
+            try:
+                cached = json.loads(SERVER_GEO_CACHE_FILE.read_text(encoding="utf-8"))
+                parsed = _parse_server_geolocation({
+                    "success": True, "ip": cached.get("ip"), "city": cached.get("city"),
+                    "connection": {"isp": cached.get("isp")},
+                })
+                fetched = float(cached.get("fetched_at", 0))
+                if parsed and fetched > 0:
+                    _server_geo_cache = (fetched, parsed)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+
+        if (not _server_geo_refreshing and monotonic_now >= _server_geo_retry_at and
+                (_server_geo_cache is None or now - _server_geo_cache[0] >= SERVER_GEO_CACHE_TTL)):
+            _server_geo_refreshing = True
+            thread = threading.Thread(target=_refresh_server_geolocation, name="kennet-server-geo", daemon=True)
+            thread.start()
+
+        if _server_geo_cache is not None:
+            return dict(_server_geo_cache[1]), "ready"
+        return {}, "loading" if _server_geo_refreshing else "unavailable"
+
+
+def _refresh_server_geolocation() -> None:
+    """Fetch public IP/ISP/city once per cache interval without blocking curses."""
+    global _server_geo_cache, _server_geo_refreshing, _server_geo_retry_at
+    try:
+        request = urllib.request.Request(
+            "https://ipwho.is/",
+            headers={"Accept": "application/json", "User-Agent": "KEN-NET server dashboard"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read(65536).decode("utf-8"))
+        facts = _parse_server_geolocation(payload)
+        if not facts:
+            raise ValueError("Public IP lookup returned no usable server details")
+        fetched = time.time()
+        with _server_geo_lock:
+            _server_geo_cache = (fetched, facts)
+            _server_geo_retry_at = time.monotonic() + SERVER_GEO_CACHE_TTL
+        try:
+            SERVER_GEO_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temporary = SERVER_GEO_CACHE_FILE.with_name(SERVER_GEO_CACHE_FILE.name + ".tmp")
+            temporary.write_text(json.dumps({"fetched_at": fetched, **facts}), encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, SERVER_GEO_CACHE_FILE)
+        except OSError:
+            pass
+    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+        with _server_geo_lock:
+            _server_geo_retry_at = time.monotonic() + 15 * 60
+    finally:
+        with _server_geo_lock:
+            _server_geo_refreshing = False
+
+
+def _local_public_ip() -> str:
+    """Find a globally routable source address without making a network request."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(0.5)
+            probe.connect(("1.1.1.1", 53))
+            address = ipaddress.ip_address(probe.getsockname()[0])
+            if address.is_global:
+                return address.compressed
+    except (OSError, ValueError, IndexError):
         pass
     try:
         route = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True,
-                               text=True, timeout=2, check=False).stdout.split()
+                               text=True, timeout=0.75, check=False).stdout.split()
         if "src" in route:
-            result["ip"] = route[route.index("src") + 1]
-    except (OSError, subprocess.SubprocessError, IndexError):
+            address = ipaddress.ip_address(route[route.index("src") + 1])
+            if address.is_global:
+                return address.compressed
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         pass
-    return result
+    return ""
+
+
+def _server_provider() -> str:
+    """Use a provider name exposed by the VM's DMI data when available."""
+    for path in (Path("/sys/class/dmi/id/sys_vendor"), Path("/sys/class/dmi/id/board_vendor"),
+                 Path("/sys/class/dmi/id/product_name")):
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        normalized = value.casefold()
+        for marker, provider in (("ovh", "OVH SAS"), ("hetzner", "Hetzner"),
+                                 ("digitalocean", "DigitalOcean"), ("amazon", "Amazon Web Services"),
+                                 ("google", "Google Cloud"), ("microsoft", "Microsoft Azure"),
+                                 ("vultr", "Vultr"), ("linode", "Akamai / Linode"), ("oracle", "Oracle Cloud")):
+            if marker in normalized:
+                return provider
+    return ""
 
 
 def _configured_listeners(protocol: str) -> str:
@@ -454,17 +611,23 @@ class Dashboard:
         self.put(y + height - 1, x, bl + h * (width - 2) + br, color)
 
     def _header(self, width: int) -> None:
-        title = f"KEN-NET  •  SERVER MANAGEMENT PANEL  v{_release_version()}"
+        title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         bar_x, bar_width = 1, width - 2
         self.put(0, bar_x, " " * bar_width, "fill_brand", width=bar_width)
         ubuntu = "[●] UBUNTU" if self.ascii else "◉ UBUNTU"
         self.put(0, 2, ubuntu, "fill_brand", bold=True, width=14)
-        title_x = max(18, (width - len(title)) // 2)
+        version = f"v{_release_version()}"
+        version_x = max(2, width - len(version) - 3)
+        title_x = max(16, (width - len(title)) // 2)
         self.put(0, title_x, title, "fill_brand", bold=True,
-                 width=max(8, width - title_x - 3))
-        # Keep the title as a clean two-row brand plate; detailed host facts
-        # are shown once in the information card below.
+                 width=max(8, version_x - title_x - 2))
+        self.put(0, version_x, version, "fill_brand", bold=True, width=len(version))
+        # Use the second row as a subtitle so the title reads as a deliberate
+        # brand card instead of a thin terminal label.
         self.put(1, bar_x, " " * bar_width, "fill_brand", width=bar_width)
+        subtitle = "LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES"
+        self.put(1, max(2, (width - len(subtitle)) // 2), subtitle,
+                 "fill_brand", bold=True, width=width - 4)
 
     def _server_details(self, y: int, width: int, summary_width: int = 62) -> None:
         """Show the requested host/account inventory without fabricated values."""
@@ -476,19 +639,29 @@ class Dashboard:
         info = self.snapshot.get("server_info", {})
         details = (
             ("SYS OS", self.snapshot.get("os", "Not configured")),
-            ("EXPIRATION", info.get("expiration", "Not configured")),
+            ("EXPIRATION", info.get("expiration", "Provider account required")),
             ("RAM", f"{self.snapshot.get('ram', '—')}%"),
             ("UP", self.snapshot.get("uptime", "Not configured")),
-            ("ISP", info.get("isp", "Not configured")),
-            ("CITY", info.get("city", "Not configured")),
-            ("IP", info.get("ip", "Not configured")),
+            ("ISP", info.get("isp", "Unavailable")),
+            ("CITY", info.get("city", "Unavailable")),
+            ("IP", info.get("ip", "Unavailable")),
             ("DOMAIN", self.snapshot.get("domain", "—")),
-            ("NS", info.get("nameserver", "Not configured")),
-            ("OWNER", info.get("owner", "Not configured")),
+            ("NS", info.get("nameserver", "Not set")),
+            ("OWNER", info.get("owner", "Not exposed locally")),
         )
-        for line, (label, value) in enumerate(details, 1):
-            self.put(y + line, x + 2, label, "dim", bold=True, width=12)
-            self.put(y + line, x + 15, str(value), "text", width=pane_width - 17)
+        if pane_width >= 80:
+            column_width = (pane_width - 4) // 2
+            for index, (label, value) in enumerate(details):
+                column, item = divmod(index, 5)
+                item_x = x + 2 + column * (column_width + 1)
+                item_y = y + 1 + item * 2
+                self.put(item_y, item_x, label, "dim", bold=True, width=column_width - 2)
+                self.put(item_y + 1, item_x, str(value), "text", bold=True, width=column_width - 2)
+        else:
+            value_width = max(8, pane_width - 18)
+            for line, (label, value) in enumerate(details, 1):
+                self.put(y + line, x + 2, label, "dim", bold=True, width=14)
+                self.put(y + line, x + 17, str(value), "text", bold=True, width=value_width)
 
     def _metric_line(self, width: int) -> None:
         items = (("LOAD", self.snapshot.get("load")), ("RAM", self.snapshot.get("ram")),
@@ -509,16 +682,51 @@ class Dashboard:
             self.put(2, x + len(label) + 1, shown, color, bold=True,
                      width=max(8, gap - len(label) - 2))
 
-    def _summary(self, y: int, width: int, *, detailed: bool = False) -> None:
+    def _summary(self, y: int, width: int, *, detailed: bool = False,
+                 box_width: int | None = None) -> None:
         if detailed:
-            # Match the reference's compact status table at the upper left.
-            # On shorter terminals the existing two-column summary is retained
-            # to preserve vertical space for every protocol and the footer.
-            box_width = min(width - 2, 62)
-            self._box(y, 1, 9, box_width, "SERVER & ACCOUNT STATUS", "blue")
+            # The wide layout uses aligned status, account, and connection
+            # columns so the values scan like a compact monitoring table.
+            box_width = min(width - 2, box_width or 62)
+            if box_width < 62:
+                self._box(y, 1, 9, box_width, "SERVER & ACCOUNT STATUS", "blue")
+                self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
+                self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
+                         width=box_width - 13)
+                self.put(y + 2, 2, ("-" if self.ascii else "─") * (box_width - 2), "line")
+                column_width = (box_width - 4) // 2
+                right_x = 3 + column_width + 2
+                self.put(y + 3, 3, "PROTOCOL TOTAL/ON", "dim", bold=True, width=column_width)
+                self.put(y + 3, right_x, "PROTOCOL TOTAL/ON", "dim", bold=True,
+                         width=box_width - (right_x - 1) - 2)
+                summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
+                by_key = {row.key: row for row in self.rows}
+                for line in range(3):
+                    for column, key in enumerate((summary_keys[line], summary_keys[line + 3])):
+                        row = by_key.get(key)
+                        if row is None:
+                            continue
+                        active = row.state in {"Active", "Service active"}
+                        color = "ok" if active else "amber" if "Partial" in row.state else "dim"
+                        total = self.snapshot.get("counts", {}).get(key, "—")
+                        online = self.snapshot.get("online", {}).get(key)
+                        online_text = "—" if online is None else str(online)
+                        text = f"{row.title.upper()} {total}/{online_text}"
+                        x = 3 if column == 0 else right_x
+                        self.put(y + 4 + line, x, "●" if not self.ascii else "*", color, bold=True)
+                        self.put(y + 4 + line, x + 2, text, "text", bold=True,
+                                 width=(column_width - 2) if column == 0 else box_width - x - 2)
+                self.put(y + 7, 3, "● RUNNING   ·   STOPPED", "dim", width=box_width - 5)
+                return
+            self._box(y, 1, 11, box_width, "SERVER & ACCOUNT STATUS", "blue")
             self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
             self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
                      width=box_width - 13)
+            self.put(y + 2, 2, ("-" if self.ascii else "─") * (box_width - 2), "line")
+            self.put(y + 3, 3, "PROTOCOL", "dim", bold=True, width=14)
+            self.put(y + 3, 20, "SERVICE", "dim", bold=True, width=9)
+            self.put(y + 3, 31, "ACCOUNTS", "dim", bold=True, width=11)
+            self.put(y + 3, 45, "CONNECTIONS", "dim", bold=True, width=15)
             summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
             by_key = {row.key: row for row in self.rows}
             for line, key in enumerate(summary_keys):
@@ -526,16 +734,18 @@ class Dashboard:
                 if row is None:
                     continue
                 active = row.state in {"Active", "Service active"}
-                state = "online" if active else "check" if "Partial" in row.state else "offline"
-                color = "ok" if active else "amber" if state == "check" else "dim"
+                state = "RUNNING" if active else "CHECK" if "Partial" in row.state else "STOPPED"
+                color = "ok" if active else "amber" if state == "CHECK" else "dim"
                 noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "acc"
                 count = str(self.snapshot.get("counts", {}).get(key, "—"))
                 connected = self.snapshot.get("online", {}).get(key)
-                connection_text = "? online" if connected is None else f"{connected} online"
-                self.put(y + 2 + line, 3, "●" if not self.ascii else "*", color, bold=True)
-                self.put(y + 2 + line, 5, row.title.upper(), "text", bold=True, width=14)
-                self.put(y + 2 + line, 21, state, color, width=9)
-                self.put(y + 2 + line, 31, f"{count} {noun} · {connection_text}", color, width=box_width - 34)
+                connection_text = "—" if connected is None else f"{connected} online"
+                row_y = y + 4 + line
+                self.put(row_y, 3, "●" if not self.ascii else "*", color, bold=True)
+                self.put(row_y, 5, row.title.upper(), "text", bold=True, width=13)
+                self.put(row_y, 20, state, color, bold=True, width=9)
+                self.put(row_y, 31, f"{count} {noun}", color, width=11)
+                self.put(row_y, 45, connection_text, color, width=15)
             return
 
         self._box(y, 1, 6, width - 2, "SERVER & ACCOUNT STATUS", "blue")
@@ -552,17 +762,15 @@ class Dashboard:
                 continue
             x = 3 + column * half
             active = row.state in {"Active", "Service active"}
-            state = "ONLINE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
-            color = "ok" if active else "amber" if state == "CHECK" else "dim"
-            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "acc"
+            state = "UP" if active else "CHK" if "Partial" in row.state else "OFF"
+            color = "ok" if active else "amber" if state == "CHK" else "dim"
+            noun = "peer" if key == "wireguard" else "svc" if key == "dnstt" else "acc"
             count = str(self.snapshot.get("counts", {}).get(key, "—"))
             connected = self.snapshot.get("online", {}).get(key)
-            connection_text = "? online" if connected is None else f"{connected} online"
+            connection_text = "—" if connected is None else f"{connected} online"
             self.put(y + 2 + line, x, "●" if not self.ascii else "*", color, bold=True)
-            self.put(y + 2 + line, x + 2, row.title.upper(), "text", bold=True,
-                     width=min(15, half // 3))
-            self.put(y + 2 + line, x + min(18, half // 2), f"{state:<7} {count} {noun} · {connection_text}", color,
-                     width=max(12, half - min(20, half // 2)))
+            status = f"{row.title.upper()}  {count} {noun} · {connection_text}"
+            self.put(y + 2 + line, x + 2, status, color, bold=True, width=half - 2)
 
     def _protocol_grid(self, top: int, width: int, *, compact: bool) -> None:
         section = "◈  PROTOCOLS  •  ACCOUNT MANAGEMENT  ◈" if not self.ascii else "== PROTOCOLS / ACCOUNT MANAGEMENT =="
@@ -570,7 +778,7 @@ class Dashboard:
         card_columns = 2 if width >= 72 else 1
         gap = 2 if card_columns == 2 else 0
         card_width = max(18, (width - 2 - gap) // card_columns)
-        card_height = 1 if getattr(self, "single_line_cards", False) else 2 if compact else 3
+        card_height = getattr(self, "protocol_card_height", 1 if getattr(self, "single_line_cards", False) else 2 if compact else 3)
         icons = {"ssh": ">_", "vmess": "<>" , "vless": "<>" , "trojan": "<>" ,
                  "shadowsocks": "~", "dropbear": "*", "openvpn": "O", "udp": "#",
                  "wireguard": "W", "slowdns": "~", "dnstt": "@", "tls": "*"}
@@ -590,32 +798,37 @@ class Dashboard:
             state = "ACTIVE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
             count = row.count.replace(" accounts", " acc").replace(" endpoints", " endp")
             icon = icons.get(key, "*")
-            if compact:
-                border = "violet" if selected else "blue"
-                left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
-                label = f" [{short_number[key]}] {row.title.upper()}  {icon} "
-                if getattr(self, "single_line_cards", False):
-                    inside = label[:max(0, card_width - 2)].ljust(card_width - 2)
-                    self.put(y, x, left + inside + right, border, bold=selected, width=card_width)
-                    self.put(y, x + 2, label, row.color, bold=True, width=card_width - 4)
-                else:
-                    self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
-                    self.put(y, x + 2, label, row.color, bold=True, width=card_width - 4)
-                    self.put(y + 1, x, vertical, border)
-                    self.put(y + 1, x + 2, f"●  {state}   {count}", "ok" if active else "amber" if "CHECK" == state else "dim", bold=True, width=card_width - 4)
-                    self.put(y + 1, x + card_width - 1, vertical, border)
-            else:
-                border = row.color if selected else "blue"
-                title = f" [{short_number[key]}] {row.title}  {icon} "[:card_width - 4]
-                left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
-                self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
+            border = ("violet" if selected else "blue") if compact else (row.color if selected else "blue")
+            left, right, vertical, horizontal = ("+", "+", "|", "-") if self.ascii else ("╭", "╮", "│", "─")
+            bottom_left, bottom_right = ("+", "+") if self.ascii else ("╰", "╯")
+            title = f" [{short_number[key]}] {row.title}  {icon} "
+            if card_height == 1:
+                inside = title[:max(0, card_width - 2)].ljust(card_width - 2)
+                self.put(y, x, left + inside + right, border, bold=selected, width=card_width)
                 self.put(y, x + 2, title, row.color, bold=True, width=card_width - 4)
-                self.put(y + 1, x, vertical, border)
-                status = f"{'●' if not self.ascii else '*'} {state}  {count}"
-                self.put(y + 1, x + 2, status, "ok" if active else "amber" if state == "CHECK" else "dim", bold=True, width=card_width - 4)
-                self.put(y + 1, x + card_width - 1, vertical, border)
-                bottom_left, bottom_right = ("+", "+") if self.ascii else ("╰", "╯")
-                self.put(y + 2, x, bottom_left + horizontal * (card_width - 2) + bottom_right,
+                continue
+
+            self.put(y, x, left + horizontal * (card_width - 2) + right, border, bold=selected)
+            self.put(y, x + 2, title, row.color, bold=True, width=card_width - 4)
+            status_color = "ok" if active else "amber" if state == "CHECK" else "dim"
+            status = f"{'●' if not self.ascii else '*'}  {state}   {count}"
+            for inner_row in range(1, card_height - 1):
+                self.put(y + inner_row, x, vertical, border)
+                self.put(y + inner_row, x + card_width - 1, vertical, border)
+            self.put(y + 1, x + 2, status, status_color, bold=True, width=card_width - 4)
+            if card_height >= 4:
+                online = self.snapshot.get("online", {}).get(key)
+                online_label = "ONLINE  —" if online is None else f"ONLINE  {online}"
+                self.put(y + 2, x + 2, online_label, "mint" if online else "dim",
+                         bold=True, width=card_width - 4)
+            if card_height >= 5:
+                ports = row.ports if row.ports and row.ports != "—" else "No public listener detected"
+                self.put(y + 3, x + 2, f"PORTS  {ports}", "dim", width=card_width - 4)
+            if card_height >= 6:
+                self.put(y + 4, x + 2, f"ENGINE  {row.engine}", "dim", width=card_width - 4)
+            if card_height >= 3:
+                self.put(y + card_height - 1, x,
+                         bottom_left + horizontal * (card_width - 2) + bottom_right,
                          border, bold=selected)
 
     def _protocol_list(self, top: int, height: int, width: int) -> None:
@@ -1288,31 +1501,22 @@ class Dashboard:
         self.stdscr.erase()
         self._header(width)
         self._metric_line(width)
-        detailed_summary = height >= 44
-        self._summary(4, width, detailed=detailed_summary)
+        layout = _main_grid_layout(height, width)
+        detailed_summary = bool(layout["detailed"])
+        summary_width = int(layout["summary_width"])
+        self._summary(4, width, detailed=detailed_summary, box_width=summary_width)
         if detailed_summary:
-            self._server_details(4, width)
-        # Six double-column cards need 18 rows; reserve two rows for tools and
-        # three for the footer before switching to the condensed presentation.
-        compact = height < 44
-        self.single_line_cards = height < 34
-        grid_top = 16 if detailed_summary else 10
-        columns = 2 if width >= 72 else 1
-        rows_per_col = (len(PROTOCOL_ORDER) + columns - 1) // columns
-        footer_y = height - 3
-        # Pick a card density from the actual available rows. Keep the tools
-        # banner and both tool rows above the footer even in resized terminals.
-        def tools_start(card_rows: int) -> int:
-            return grid_top + 1 + rows_per_col * card_rows + 1
-        if tools_start(3) + 2 >= footer_y:
-            compact = True
-        if tools_start(2) + 2 >= footer_y:
-            compact = True
-            self.single_line_cards = True
+            self._server_details(4, width, summary_width=summary_width)
+        # Distribute the real terminal height into the protocol cards instead
+        # of pinning them to three rows and leaving a large empty lower pane.
+        grid_top = int(layout["grid_top"])
+        footer_y = int(layout["footer_y"])
+        card_height = int(layout["card_height"])
+        self.protocol_card_height = card_height
+        self.single_line_cards = card_height == 1
+        compact = card_height <= 2
         self._protocol_grid(grid_top, width, compact=compact)
-        card_rows = 1 if self.single_line_cards else 2 if compact else 3
-        grid_bottom = grid_top + 1 + rows_per_col * card_rows
-        tools_y = grid_bottom + 1
+        tools_y = int(layout["tools_y"])
         self._tools(tools_y, width)
         self.put(footer_y, 1, ("-" if self.ascii else "─") * (width - 2), "line")
         prompt = f"Select option [0-15]: {self.numeric}{' ' if self.ascii else '▌'}"
