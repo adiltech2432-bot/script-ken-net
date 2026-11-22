@@ -89,7 +89,7 @@ class DashboardDataTests(unittest.TestCase):
         self.assertGreater(layouts[-1]["card_height"], layouts[1]["card_height"])
         self.assertTrue(layouts[-1]["detailed"])
 
-    def test_narrow_detailed_status_card_uses_a_compact_two_column_table(self):
+    def test_narrow_detailed_status_card_uses_protocol_active_total_and_connection_columns(self):
         dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
         dashboard.ascii = False
         dashboard.snapshot = {
@@ -106,9 +106,36 @@ class DashboardDataTests(unittest.TestCase):
 
         dashboard._summary(4, 94, detailed=True, box_width=45)
 
-        self.assertTrue(any("BOX:9:45:SERVER & ACCOUNT STATUS" in item[2] for item in calls))
-        self.assertEqual(sum(item[2] == "PROTOCOL TOTAL/ON" for item in calls), 2)
-        self.assertTrue(any("WIREGUARD 1/0" in item[2] for item in calls))
+        self.assertTrue(any("BOX:12:45:SERVER & ACCOUNT STATUS" in item[2] for item in calls))
+        for header in ("PROTOCOL", "ACTIVE", "TOTAL ACC", "ONLINE"):
+            self.assertIn(header, [item[2] for item in calls])
+        self.assertIn("WIREGUARD", [item[2] for item in calls])
+        self.assertIn("1 peers", [item[2] for item in calls])
+        self.assertIn("0 online", [item[2] for item in calls])
+        self.assertNotIn("● RUNNING   ·   STOPPED", [item[2] for item in calls])
+
+    def test_wide_detailed_status_card_shows_full_connection_table_labels(self):
+        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+        dashboard.ascii = False
+        dashboard.snapshot = {
+            "domain": "it.example.org",
+            "counts": {key: 1 for key in dashboard_tui.PROTOCOL_ORDER},
+            "online": {key: 2 for key in dashboard_tui.PROTOCOL_ORDER},
+        }
+        dashboard.rows = [dashboard_tui.Row(key, key.title(), "GROUP", "blue", "Active",
+                                            "active", "1 account", "xray", "TCP/443")
+                          for key in ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")]
+        calls = []
+        dashboard.put = lambda y, x, text, *args, **kwargs: calls.append((y, x, str(text)))
+        dashboard._box = lambda y, x, height, width, title, color: calls.append((y, x,
+                            f"BOX:{height}:{width}:{title}"))
+
+        dashboard._summary(4, 120, detailed=True, box_width=62)
+
+        rendered = [item[2] for item in calls]
+        for header in ("PROTOCOL", "ACTIVE", "TOTAL ACCOUNTS", "CONNECTIONS"):
+            self.assertIn(header, rendered)
+        self.assertIn("2 online", rendered)
 
     def test_header_uses_a_prominent_title_and_version_badge(self):
         dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)

@@ -685,48 +685,25 @@ class Dashboard:
     def _summary(self, y: int, width: int, *, detailed: bool = False,
                  box_width: int | None = None) -> None:
         if detailed:
-            # The wide layout uses aligned status, account, and connection
-            # columns so the values scan like a compact monitoring table.
             box_width = min(width - 2, box_width or 62)
-            if box_width < 62:
-                self._box(y, 1, 9, box_width, "SERVER & ACCOUNT STATUS", "blue")
-                self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
-                self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
-                         width=box_width - 13)
-                self.put(y + 2, 2, ("-" if self.ascii else "─") * (box_width - 2), "line")
-                column_width = (box_width - 4) // 2
-                right_x = 3 + column_width + 2
-                self.put(y + 3, 3, "PROTOCOL TOTAL/ON", "dim", bold=True, width=column_width)
-                self.put(y + 3, right_x, "PROTOCOL TOTAL/ON", "dim", bold=True,
-                         width=box_width - (right_x - 1) - 2)
-                summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
-                by_key = {row.key: row for row in self.rows}
-                for line in range(3):
-                    for column, key in enumerate((summary_keys[line], summary_keys[line + 3])):
-                        row = by_key.get(key)
-                        if row is None:
-                            continue
-                        active = row.state in {"Active", "Service active"}
-                        color = "ok" if active else "amber" if "Partial" in row.state else "dim"
-                        total = self.snapshot.get("counts", {}).get(key, "—")
-                        online = self.snapshot.get("online", {}).get(key)
-                        online_text = "—" if online is None else str(online)
-                        text = f"{row.title.upper()} {total}/{online_text}"
-                        x = 3 if column == 0 else right_x
-                        self.put(y + 4 + line, x, "●" if not self.ascii else "*", color, bold=True)
-                        self.put(y + 4 + line, x + 2, text, "text", bold=True,
-                                 width=(column_width - 2) if column == 0 else box_width - x - 2)
-                self.put(y + 7, 3, "● RUNNING   ·   STOPPED", "dim", width=box_width - 5)
-                return
-            self._box(y, 1, 11, box_width, "SERVER & ACCOUNT STATUS", "blue")
+            self._box(y, 1, 12, box_width, "SERVER & ACCOUNT STATUS", "blue")
             self.put(y + 1, 3, "DOMAIN", "dim", bold=True)
             self.put(y + 1, 11, self.snapshot.get("domain", "—"), "text", bold=True,
                      width=box_width - 13)
             self.put(y + 2, 2, ("-" if self.ascii else "─") * (box_width - 2), "line")
-            self.put(y + 3, 3, "PROTOCOL", "dim", bold=True, width=14)
-            self.put(y + 3, 20, "SERVICE", "dim", bold=True, width=9)
-            self.put(y + 3, 31, "ACCOUNTS", "dim", bold=True, width=11)
-            self.put(y + 3, 45, "CONNECTIONS", "dim", bold=True, width=15)
+            inner_width = box_width - 4
+            if box_width < 56:
+                column_widths = (9, 8, 9, inner_width - 9 - 8 - 9 - 3)
+                headers = ("PROTOCOL", "ACTIVE", "TOTAL ACC", "ONLINE")
+            else:
+                column_widths = (13, 10, 15, inner_width - 13 - 10 - 15 - 3)
+                headers = ("PROTOCOL", "ACTIVE", "TOTAL ACCOUNTS", "CONNECTIONS")
+            column_x = [3]
+            for column_width in column_widths[:-1]:
+                column_x.append(column_x[-1] + column_width + 1)
+            for x, label, column_width in zip(column_x, headers, column_widths):
+                self.put(y + 3, x, label, "blue", bold=True, width=column_width)
+            self.put(y + 4, 2, ("-" if self.ascii else "─") * (box_width - 2), "line")
             summary_keys = ("ssh", "vmess", "vless", "trojan", "wireguard", "dnstt")
             by_key = {row.key: row for row in self.rows}
             for line, key in enumerate(summary_keys):
@@ -734,18 +711,21 @@ class Dashboard:
                 if row is None:
                     continue
                 active = row.state in {"Active", "Service active"}
-                state = "RUNNING" if active else "CHECK" if "Partial" in row.state else "STOPPED"
-                color = "ok" if active else "amber" if state == "CHECK" else "dim"
+                state = "ACTIVE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
+                status_color = "ok" if active else "amber" if state == "CHECK" else "dim"
                 noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "acc"
                 count = str(self.snapshot.get("counts", {}).get(key, "—"))
                 connected = self.snapshot.get("online", {}).get(key)
                 connection_text = "—" if connected is None else f"{connected} online"
-                row_y = y + 4 + line
-                self.put(row_y, 3, "●" if not self.ascii else "*", color, bold=True)
-                self.put(row_y, 5, row.title.upper(), "text", bold=True, width=13)
-                self.put(row_y, 20, state, color, bold=True, width=9)
-                self.put(row_y, 31, f"{count} {noun}", color, width=11)
-                self.put(row_y, 45, connection_text, color, width=15)
+                row_y = y + 5 + line
+                self.put(row_y, column_x[0], row.title.upper(), "text", bold=True,
+                         width=column_widths[0])
+                self.put(row_y, column_x[1], state, status_color, bold=True,
+                         width=column_widths[1])
+                self.put(row_y, column_x[2], f"{count} {noun}", "text",
+                         width=column_widths[2])
+                self.put(row_y, column_x[3], connection_text, "mint" if connected else "dim",
+                         width=column_widths[3])
             return
 
         self._box(y, 1, 6, width - 2, "SERVER & ACCOUNT STATUS", "blue")
