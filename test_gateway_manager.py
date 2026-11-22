@@ -40,11 +40,14 @@ class GatewayRenderingTests(unittest.TestCase):
 
     def test_haproxy_terminates_tls_and_multiplexes_ssh_and_web_traffic(self):
         config = gateway_manager.render_haproxy("/etc/haproxy/certs/vpn.example.org.pem")
-        self.assertIn("bind 127.0.0.1:8444 ssl crt /etc/haproxy/certs/vpn.example.org.pem", config)
+        self.assertIn("bind 127.0.0.1:8444 ssl crt /etc/haproxy/certs/vpn.example.org.pem alpn h2,http/1.1 accept-proxy", config)
         self.assertIn("use_backend kennet_ssh_raw if ssh_banner", config)
         self.assertIn("use_backend kennet_nginx_http if http_request or http2_preface", config)
         self.assertIn("backend kennet_tls_termination", config)
         self.assertIn("server nginx_http 127.0.0.1:8081 check", config)
+        self.assertIn("server tls_termination 127.0.0.1:8444 check send-proxy-v2", config)
+        self.assertIn("server nginx_http 127.0.0.1:8081 check send-proxy-v2", config)
+        self.assertIn("server nginx_tls 127.0.0.1:8443 check send-proxy-v2", config)
 
     def test_nginx_routes_xray_websocket_grpc_and_tunnel_bridge(self):
         config = gateway_manager.render_nginx("vpn.example.org")
@@ -54,8 +57,10 @@ class GatewayRenderingTests(unittest.TestCase):
         self.assertIn("location = /whatever/trojan-ws", config)
         self.assertIn("proxy_pass http://127.0.0.1:10003/whatever/trojan-ws", config)
         self.assertIn("location = /trojan-ws", config)
-        self.assertIn("listen 127.0.0.1:8443 ssl http2", config)
-        self.assertIn("listen 127.0.0.1:8081;", config)
+        self.assertIn("listen 127.0.0.1:8443 ssl http2 proxy_protocol", config)
+        self.assertIn("listen 127.0.0.1:8081 proxy_protocol;", config)
+        self.assertIn("proxy_set_header X-Forwarded-For $proxy_protocol_addr;", config)
+        self.assertIn("grpc_set_header X-Forwarded-For $proxy_protocol_addr;", config)
         self.assertNotIn("listen 127.0.0.1:8081 http2", config)
         self.assertIn("proxy_pass http://127.0.0.1:10015", config)
         self.assertIn("location ^~ /trojan-grpc/", config)

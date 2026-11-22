@@ -497,6 +497,40 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         self.assertTrue(all(item["listen"] == "127.0.0.1" for item in inbounds))
         self.assertEqual(inbounds[0]["streamSettings"]["wsSettings"]["path"], "/vless")
         self.assertEqual(inbounds[1]["streamSettings"]["grpcSettings"]["serviceName"], "vless-grpc")
+        self.assertEqual(inbounds[0]["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"])
+        self.assertEqual(inbounds[1]["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"])
+
+    def test_configure_xray_online_stats_migrates_existing_transports_for_client_ips(self):
+        from pathlib import Path
+
+        config = {
+            "api": {"tag": "kennet-api", "services": ["StatsService"]},
+            "stats": {},
+            "policy": {"levels": {"0": {"statsUserOnline": True}}},
+            "inbounds": [
+                {"tag": "kennet-api", "listen": "127.0.0.1", "port": 10086,
+                 "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}},
+                {"tag": "kennet-trojan-ws", "listen": "127.0.0.1", "port": 10003,
+                 "protocol": "trojan", "settings": {"clients": [{"password": "alice", "email": "alice"}]},
+                 "streamSettings": {"network": "ws", "security": "none",
+                                    "wsSettings": {"path": "/whatever/trojan-ws"}}},
+            ],
+            "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["kennet-api"],
+                                    "outboundTag": "kennet-api"}]},
+        }
+        written = {}
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(services, "XRAY_CONFIG", Path(temp) / "config.json"), \
+             patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
+             patch.object(services, "_write_xray", side_effect=lambda value: written.update(
+                 json.loads(json.dumps(value)))):
+            services.XRAY_CONFIG.write_text(json.dumps(config))
+            result = services.configure_xray_online_stats()
+
+        self.assertEqual(result, (False, False, True))
+        trojan = next(item for item in written["inbounds"] if item["tag"] == "kennet-trojan-ws")
+        self.assertEqual(trojan["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"])
 
     def test_legacy_trojan_tls_account_migrates_to_shared_inbounds(self):
         config = {"inbounds": [{

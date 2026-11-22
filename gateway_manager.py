@@ -28,7 +28,7 @@ def render_haproxy(tls_cert: str | None = None) -> str:
         tls_termination = f"""
 frontend kennet_tls_terminated
     mode tcp
-    bind 127.0.0.1:8444 ssl crt {tls_cert} alpn h2,http/1.1
+    bind 127.0.0.1:8444 ssl crt {tls_cert} alpn h2,http/1.1 accept-proxy
     tcp-request inspect-delay 2s
     acl ssh_banner payload(0,7) -m str SSH-2.0
     acl http_request req.proto_http
@@ -40,7 +40,7 @@ frontend kennet_tls_terminated
 
 backend kennet_tls_termination
     mode tcp
-    server tls_termination 127.0.0.1:8444 check
+    server tls_termination 127.0.0.1:8444 check send-proxy-v2
 """
         tls_backend = "    use_backend kennet_tls_termination if tls_client_hello\n    default_backend kennet_tls_termination"
     else:
@@ -91,7 +91,7 @@ frontend kennet_tls_mux
 
 backend kennet_nginx_http
     mode tcp
-    server nginx_http 127.0.0.1:8081 check
+    server nginx_http 127.0.0.1:8081 check send-proxy-v2
 
 backend kennet_ws_bridge
     mode tcp
@@ -99,7 +99,7 @@ backend kennet_ws_bridge
 
 backend kennet_nginx_tls
     mode tcp
-    server nginx_tls 127.0.0.1:8443 check
+    server nginx_tls 127.0.0.1:8443 check send-proxy-v2
 
 backend kennet_openvpn_tcp
     mode tcp
@@ -163,6 +163,7 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
         "        proxy_set_header Upgrade $http_upgrade;\n"
         "        proxy_set_header Connection \"upgrade\";\n"
         "        proxy_set_header X-Real-Host $http_x_real_host;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_protocol_addr;\n"
         "        proxy_read_timeout 1h;\n"
         "    }"
         for path, (port, upstream_path) in ws_locations.items()
@@ -178,12 +179,13 @@ def render_nginx(domain: str, *, include_tls: bool = True) -> str:
     grpc_locations = "\n".join(
         f"    location ^~ /{name}-grpc/ {{\n"
         f"        grpc_pass grpc://127.0.0.1:{port};\n"
+        "        grpc_set_header X-Forwarded-For $proxy_protocol_addr;\n"
         "        grpc_read_timeout 1h;\n"
         "    }"
         for name, port in (("vless", 10005), ("vmess", 10006), ("trojan", 10007), ("ss", 10008))
     )
     tls_server = f"""server {{
-    listen 127.0.0.1:8443 ssl http2;
+    listen 127.0.0.1:8443 ssl http2 proxy_protocol;
     server_name {domain};
     ssl_certificate {cert}/fullchain.pem;
     ssl_certificate_key {cert}/privkey.pem;
@@ -197,7 +199,7 @@ server {{
     # HAProxy terminates public TLS and forwards HTTP/1.1 WebSocket requests.
     # Keep this cleartext backend on HTTP/1.x; enabling h2 here makes Nginx
     # emit binary HTTP/2 SETTINGS frames to HTTP/1.1 clients.
-    listen 127.0.0.1:8081;
+    listen 127.0.0.1:8081 proxy_protocol;
     server_name {domain};
     location ^~ /.well-known/acme-challenge/ {{ root /var/www/letsencrypt; }}
 {legacy_root}

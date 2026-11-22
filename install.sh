@@ -103,11 +103,13 @@ sys.path.insert(0, sys.argv[1])
 import services_manager
 
 try:
-    outbound_updated, stats_updated = services_manager.configure_xray_online_stats()
+    outbound_updated, stats_updated, transport_updated = services_manager.configure_xray_online_stats()
     if outbound_updated:
         print("Repaired Xray: added the missing direct freedom outbound.")
     if stats_updated:
         print("Enabled Xray per-account online IP statistics through a loopback-only API.")
+    if transport_updated:
+        print("Updated Xray WebSocket/gRPC transports to trust client IPs forwarded by the local gateway.")
 except Exception as exc:
     print(f"Warning: Xray per-account online statistics were not enabled: {exc}", file=sys.stderr)
 PY

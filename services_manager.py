@@ -1220,17 +1220,18 @@ def ensure_xray_default_outbound() -> bool:
     return True
 
 
-def configure_xray_online_stats() -> tuple[bool, bool]:
-    """Migrate an existing Xray installation to forwarding and per-user IP stats."""
+def configure_xray_online_stats() -> tuple[bool, bool, bool]:
+    """Migrate Xray routing, transports, and per-user online-IP stats."""
     if not XRAY_CONFIG.is_file() or not shutil.which("xray"):
-        return False, False
+        return False, False, False
     config = get_xray_config()
     outbound_updated = _ensure_default_xray_outbound(config)
     stats_updated = _ensure_xray_online_stats(config)
-    if not outbound_updated and not stats_updated:
-        return False, False
+    transport_updated = _refresh_managed_transports(config)
+    if not outbound_updated and not stats_updated and not transport_updated:
+        return False, False, False
     _write_xray(config)
-    return outbound_updated, stats_updated
+    return outbound_updated, stats_updated, transport_updated
 
 
 def _write_xray(cfg: dict) -> None:
@@ -1400,7 +1401,13 @@ def _managed_protocol_inbounds(protocol: str, clients: list[dict]) -> list[dict]
             settings["decryption"] = "none"
         if protocol == "shadowsocks":
             settings["network"] = "tcp"
-        stream = {"network": network, "security": "none"}
+        stream = {
+            "network": network,
+            "security": "none",
+            # The local Nginx gateway overwrites this header with the original
+            # client address recovered from HAProxy's PROXY protocol header.
+            "sockopt": {"trustedXForwardedFor": ["X-Forwarded-For"]},
+        }
         if network == "ws":
             stream["wsSettings"] = {"path": path_or_service}
         else:
