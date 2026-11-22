@@ -181,16 +181,16 @@ def collect_rows() -> tuple[list[Row], dict[str, object]]:
 
     online: dict[str, int | None] = {key: None for key in PROTOCOL_ORDER}
     if services_manager is not None:
+        services_manager.refresh_xray_online_ip_counts_async()
         for key in ("ssh", "vmess", "vless", "trojan"):
             try:
-                per_account = services_manager.active_connections(key)
-                online[key] = sum(per_account.values())
+                if key == "ssh":
+                    online[key] = sum(services_manager.ssh_session_counts().values())
+                else:
+                    per_account = services_manager.cached_xray_online_ip_counts(key)
+                    online[key] = sum(per_account.values()) if per_account is not None else None
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                 online[key] = None
-        try:
-            online["ssh"] = sum(services_manager.ssh_session_counts().values())
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-            online["ssh"] = None
     try:
         server_card = _server_info_card(domain)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
@@ -716,7 +716,8 @@ class Dashboard:
                 return services_manager.account_roster_rows("udp", names)
             if key in {"vmess", "vless", "trojan", "shadowsocks"}:
                 names = services_manager.selectable_account_names(key)
-                connections = services_manager.active_connections(key)
+                services_manager.refresh_xray_online_ip_counts_async()
+                connections = services_manager.cached_xray_online_ip_counts(key)
                 return services_manager.account_roster_rows(
                     key, names, connections=connections, connection_unit="IP")
             def expiry(record: dict) -> str:

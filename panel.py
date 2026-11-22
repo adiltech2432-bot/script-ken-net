@@ -351,7 +351,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KEN-NET server management panel")
     parser.add_argument("--plain", action="store_true", help="use the dashboard without color or Unicode art")
     parser.add_argument("--legacy", action="store_true", help="launch the original menu unchanged")
+    parser.add_argument("--xray-reset", action="store_true",
+                        help="replace Xray configuration with a clean baseline and remove Xray test accounts")
     args = parser.parse_args(argv)
+    if args.xray_reset:
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            print("Xray reset requires root. Run: sudo kennet-panel --xray-reset")
+            return 2
+        import services_manager
+        try:
+            services_manager.xray_reset_from_scratch()
+            return 0
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            print(f"Xray reset failed: {exc}")
+            return 1
     if args.legacy:
         return legacy_main()
     if not sys.platform.startswith("linux"):

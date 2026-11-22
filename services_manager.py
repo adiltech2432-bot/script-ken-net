@@ -16,6 +16,8 @@ import string
 import subprocess
 import socket
 import tempfile
+import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -37,6 +39,25 @@ XRAY_WS_PROFILE = {
     "trojan": {"path": "/whatever/trojan-ws", "sni": "Google.com"},
     "shadowsocks": {"path": "/ss-ws", "sni": "domain"},
 }
+XRAY_ONLINE_CACHE_SECONDS = 2.5
+XRAY_ONLINE_STALE_SECONDS = 15.0
+_xray_online_ip_cache: tuple[float, dict[str, int]] | None = None
+_xray_online_cache_lock = threading.Lock()
+_xray_online_refresh_lock = threading.Lock()
+
+
+def _normalize_xray_protocol(protocol: str) -> str:
+    """Accept canonical IDs and the case/spacing used by menu labels."""
+    key = str(protocol).strip().casefold()
+    if key not in XRAY_PORTS:
+        raise ValueError(f"Unsupported Xray protocol: {protocol!r}")
+    return key
+
+
+def _invalidate_xray_online_cache() -> None:
+    global _xray_online_ip_cache
+    with _xray_online_cache_lock:
+        _xray_online_ip_cache = None
 
 
 def _run(args: list[str], input_text: str | None = None) -> str:
@@ -679,7 +700,7 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
 
 def account_details(protocol: str, username: str) -> dict:
     record = state().get("accounts", {}).get(username)
-    if not record or record.get("protocol") != protocol:
+    if not record or str(record.get("protocol", "")).strip().casefold() != str(protocol).strip().casefold():
         raise ValueError("Managed account not found")
     return {"username": username, **record}
 
@@ -842,42 +863,101 @@ def _xray_api_port(cfg: dict) -> int:
 
 
 def xray_online_ip_counts(protocol: str) -> dict[str, int]:
-    """Return Xray's active client IP count by account email."""
-    if protocol not in XRAY_PORTS:
-        raise ValueError(f"Connection counting is not implemented for {protocol}")
+    """Return Xray's active unique client IP count by account email.
+
+    Xray's ``-all`` API endpoint lets the dashboard read every account in one
+    bounded request. A very short shared cache prevents four Xray protocol
+    cards from issuing the same query during one screen refresh.
+    """
+    global _xray_online_ip_cache
+    protocol = _normalize_xray_protocol(protocol)
+    usernames = xray_list(protocol)
+    if not usernames:
+        return {}
+    now = time.monotonic()
+    with _xray_online_cache_lock:
+        cache = _xray_online_ip_cache
+    if cache is not None and now - cache[0] < XRAY_ONLINE_CACHE_SECONDS:
+        cached = cache[1]
+        return {username: cached.get(username, 0) for username in usernames}
+
     cfg = get_xray_config()
     port = _xray_api_port(cfg)
     if not port:
         raise RuntimeError("Xray online-statistics API is not configured; reinstall/configure Xray first")
+    result = subprocess.run(
+        ["xray", "api", "statsonlineiplist", f"--server=127.0.0.1:{port}", "-timeout=1", "-all"],
+        capture_output=True, text=True, check=False, timeout=2,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "Xray online statistics query failed").strip())
+    try:
+        payload = json.loads((result.stdout or "{}").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Xray online statistics returned unreadable data") from exc
+    online_users = payload.get("users") if isinstance(payload, dict) else None
+    if not isinstance(online_users, list):
+        raise RuntimeError("Xray all-users response did not contain a users list")
+
     counts: dict[str, int] = {}
-    for username in xray_list(protocol):
-        result = subprocess.run(["xray", "api", "statsonlineiplist", f"--server=127.0.0.1:{port}",
-                                 "-email", username], capture_output=True, text=True, check=False, timeout=8)
-        if result.returncode:
-            raise RuntimeError((result.stderr or result.stdout or "Xray online statistics query failed").strip())
-        output = (result.stdout or "").strip()
-        if not output:
-            counts[username] = 0
+    for entry in online_users:
+        if not isinstance(entry, dict) or not isinstance(entry.get("email"), str):
             continue
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Xray online statistics returned unreadable data") from exc
-        ips = payload.get("ips") if isinstance(payload, dict) else None
+        ips = entry.get("ips")
         if isinstance(ips, list):
-            # Xray's API returns repeated OnlineIPEntry objects, not a map.
-            addresses = {
-                entry.get("ip")
-                for entry in ips
-                if isinstance(entry, dict) and isinstance(entry.get("ip"), str) and entry["ip"]
-            }
+            addresses = {item.get("ip") for item in ips
+                         if isinstance(item, dict) and isinstance(item.get("ip"), str) and item["ip"]}
         elif isinstance(ips, dict):
-            # Keep compatibility with wrappers that serialize IP entries as a map.
             addresses = {str(address) for address in ips if address}
         else:
             raise RuntimeError("Xray online-IP response did not contain an IP list")
-        counts[username] = len(addresses)
-    return counts
+        counts[entry["email"]] = len(addresses)
+
+    with _xray_online_cache_lock:
+        _xray_online_ip_cache = (now, counts)
+    return {username: counts.get(username, 0) for username in usernames}
+
+
+def cached_xray_online_ip_counts(protocol: str) -> dict[str, int] | None:
+    """Return a recent Xray snapshot without blocking the terminal UI."""
+    protocol = _normalize_xray_protocol(protocol)
+    usernames = xray_list(protocol)
+    if not usernames:
+        return {}
+    with _xray_online_cache_lock:
+        cache = _xray_online_ip_cache
+    if cache is None or time.monotonic() - cache[0] > XRAY_ONLINE_STALE_SECONDS:
+        return None
+    return {username: cache[1].get(username, 0) for username in usernames}
+
+
+def refresh_xray_online_ip_counts_async() -> None:
+    """Refresh the shared Xray online snapshot on a daemon thread for the TUI."""
+    now = time.monotonic()
+    with _xray_online_cache_lock:
+        cache = _xray_online_ip_cache
+    if cache is not None and now - cache[0] < XRAY_ONLINE_CACHE_SECONDS:
+        return
+    if not _xray_online_refresh_lock.acquire(blocking=False):
+        return
+
+    def refresh() -> None:
+        global _xray_online_ip_cache
+        try:
+            for protocol in XRAY_PORTS:
+                if xray_list(protocol):
+                    xray_online_ip_counts(protocol)
+                    return
+            with _xray_online_cache_lock:
+                _xray_online_ip_cache = (time.monotonic(), {})
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+            # Leave the last successful sample in place; the UI marks it
+            # unknown after XRAY_ONLINE_STALE_SECONDS rather than freezing.
+            pass
+        finally:
+            _xray_online_refresh_lock.release()
+
+    threading.Thread(target=refresh, name="kennet-xray-online-stats", daemon=True).start()
 
 
 def active_connections(protocol: str) -> dict[str, int]:
@@ -908,8 +988,14 @@ def ssh_session_sources() -> dict[str, list[str]]:
     managed = set(ssh_list())
     if not managed:
         return {}
-    sockets = subprocess.run(["ss", "-Htnp", "state", "established"], capture_output=True, text=True, check=False)
-    processes = subprocess.run(["ps", "-eo", "user=,pid=,args="], capture_output=True, text=True, check=False)
+    sockets = subprocess.run(["ss", "-Htnp", "state", "established"], capture_output=True,
+                             text=True, check=False, timeout=2)
+    processes = subprocess.run(["ps", "-eo", "user=,pid=,args="], capture_output=True,
+                               text=True, check=False, timeout=2)
+    if getattr(sockets, "returncode", 0):
+        raise RuntimeError((sockets.stderr or "Could not inspect established SSH sessions").strip())
+    if getattr(processes, "returncode", 0):
+        raise RuntimeError((processes.stderr or "Could not map SSH sessions to account names").strip())
     pid_users: dict[str, str] = {}
     for line in processes.stdout.splitlines():
         fields = line.strip().split(None, 2)
@@ -947,6 +1033,8 @@ def ssh_session_counts() -> dict[str, int]:
 
 
 def xray_renew(protocol: str, username: str, days: int) -> None:
+    protocol = _normalize_xray_protocol(protocol)
+    username = username.strip()
     if protocol not in XRAY_PORTS or not 1 <= int(days) <= 3650:
         raise ValueError("Invalid protocol or validity period")
     record = account_details(protocol, username)
@@ -969,9 +1057,7 @@ def xray_renew(protocol: str, username: str, days: int) -> None:
     _atomic(STATE, json.dumps(data, indent=2) + "\n")
 
 
-def xray_install() -> None:
-    if input("This will install the official Xray-core service from XTLS/Xray-install. Type YES to continue: ").strip() != "YES":
-        return
+def _install_xray_core() -> None:
     if not shutil.which("xray"):
         _run(["apt-get", "update"])
         _run(["apt-get", "install", "-y", "curl", "ca-certificates"])
@@ -979,6 +1065,12 @@ def xray_install() -> None:
         p = subprocess.run(["bash", "-s", "--", "install"], input=script, text=True, capture_output=True)
         if p.returncode:
             raise RuntimeError((p.stderr or p.stdout).strip())
+
+
+def xray_install() -> None:
+    if input("This will install/configure the official Xray-core service. Type YES to continue: ").strip() != "YES":
+        return
+    _install_xray_core()
     if not XRAY_CONFIG.exists():
         _atomic(XRAY_CONFIG, json.dumps({"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"}],"routing":{"rules":[]}}, indent=2)+"\n", 0o644)
     original = XRAY_CONFIG.read_text(encoding="utf-8")
@@ -1008,6 +1100,77 @@ def xray_install() -> None:
     if stats_updated:
         print("Enabled Xray per-account online IP statistics through a loopback-only API.")
     print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
+
+
+def xray_reset_from_scratch() -> bool:
+    """Replace the Xray config with a validated clean baseline and discard Xray test accounts."""
+    if input("This removes all Xray inbounds, settings, managed accounts, and expired Xray records. Type RESET XRAY: ").strip() != "RESET XRAY":
+        print("Xray reset cancelled.")
+        return False
+    _install_xray_core()
+
+    old_config = XRAY_CONFIG.read_text(encoding="utf-8") if XRAY_CONFIG.is_file() else None
+    old_state = STATE.read_text(encoding="utf-8") if STATE.is_file() else None
+    old_expired = EXPIRED_STATE.read_text(encoding="utf-8") if EXPIRED_STATE.is_file() else None
+    fresh = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [],
+        "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+        "routing": {"rules": []},
+    }
+    _ensure_xray_online_stats(fresh)
+
+    def restore(path: Path, content: str | None, mode: int) -> None:
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic(path, content, mode)
+
+    try:
+        _atomic(XRAY_CONFIG, json.dumps(fresh, indent=2) + "\n", 0o644)
+        check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)],
+                               capture_output=True, text=True, check=False, timeout=15)
+        if check.returncode:
+            raise RuntimeError((check.stderr or check.stdout or "Fresh Xray config validation failed").strip())
+        for action in ("enable", "restart"):
+            result = subprocess.run(["systemctl", action, "xray"], capture_output=True,
+                                    text=True, check=False, timeout=15)
+            if result.returncode:
+                raise RuntimeError((result.stderr or result.stdout or f"Could not {action} xray.service").strip())
+        active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"],
+                                capture_output=True, text=True, check=False, timeout=5)
+        if active.returncode:
+            raise RuntimeError("Fresh Xray config validated, but xray.service did not become active")
+
+        data = json.loads(old_state) if old_state else {"domain": "", "accounts": {}}
+        accounts = data.get("accounts", {})
+        if isinstance(accounts, dict):
+            data["accounts"] = {name: record for name, record in accounts.items()
+                                 if not isinstance(record, dict)
+                                 or str(record.get("protocol", "")).strip().casefold() not in XRAY_PORTS}
+        _atomic(STATE, json.dumps(data, indent=2) + "\n")
+        if old_expired is not None:
+            archived = json.loads(old_expired)
+            if isinstance(archived, dict):
+                archived = {key: record for key, record in archived.items()
+                            if key.split(":", 1)[0].strip().casefold() not in XRAY_PORTS
+                            and not (isinstance(record, dict)
+                                     and str(record.get("protocol", "")).strip().casefold() in XRAY_PORTS)}
+                _atomic(EXPIRED_STATE, json.dumps(archived, indent=2) + "\n")
+    except Exception:
+        restore(XRAY_CONFIG, old_config, 0o644)
+        restore(STATE, old_state, 0o600)
+        restore(EXPIRED_STATE, old_expired, 0o600)
+        try:
+            subprocess.run(["systemctl", "restart", "xray"], capture_output=True,
+                           text=True, check=False, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise
+
+    _invalidate_xray_online_cache()
+    print("Xray was rebuilt from a clean config. Xray test accounts and expired Xray records were removed; other services and the shared domain were preserved.")
+    return True
 
 
 def get_xray_config() -> dict:
@@ -1070,8 +1233,12 @@ def _write_xray(cfg: dict) -> None:
 
 
 def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = False, trial_minutes: int | None = None) -> str:
-    if protocol not in XRAY_PORTS or not NAME_RE.fullmatch(username):
-        raise ValueError("Invalid protocol or username")
+    protocol = _normalize_xray_protocol(protocol)
+    if not isinstance(username, str):
+        raise ValueError("Username must contain 3-32 English letters, numbers, or underscores")
+    username = username.strip()
+    if not NAME_RE.fullmatch(username):
+        raise ValueError("Username must contain 3-32 English letters, numbers, or underscores")
     if not 1 <= int(days) <= 3650:
         raise ValueError("Validity must be between 1 and 3650 days")
     if protocol in {"vless", "vmess"} and len(username.encode("utf-8")) >= 30:
@@ -1107,16 +1274,21 @@ def xray_add(protocol: str, username: str, days: int = 30, *, trial: bool = Fals
     data["accounts"][username] = {"protocol":protocol,"credential":credential,"port":port,"expires_at":expires,"trial":trial}
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
     install_expiry_timer()
+    _invalidate_xray_online_cache()
     return credential
 
 
 def xray_list(protocol: str) -> list[str]:
-    return sorted(u for u,a in state()["accounts"].items() if a.get("protocol")==protocol)
+    protocol = _normalize_xray_protocol(protocol)
+    return sorted(u for u, a in state()["accounts"].items()
+                  if isinstance(a, dict) and str(a.get("protocol", "")).strip().casefold() == protocol)
 
 
 def xray_remove(protocol: str, username: str) -> None:
+    protocol = _normalize_xray_protocol(protocol)
+    username = username.strip()
     data=state(); account=data["accounts"].get(username)
-    if not account or account.get("protocol")!=protocol: raise ValueError("Account not found")
+    if not account or str(account.get("protocol", "")).strip().casefold() != protocol: raise ValueError("Account not found")
     cfg=get_xray_config()
     for inbound in cfg.get("inbounds", []):
         if inbound.get("tag") in _managed_tags(protocol):
@@ -1124,6 +1296,7 @@ def xray_remove(protocol: str, username: str) -> None:
                 item for item in inbound.get("settings", {}).get("clients", []) if item.get("email") != username]
     _write_xray(cfg); del data["accounts"][username]
     _atomic(STATE,json.dumps(data,indent=2)+"\n")
+    _invalidate_xray_online_cache()
 
 
 def _managed_tags(protocol: str) -> set[str]:

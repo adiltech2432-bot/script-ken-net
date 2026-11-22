@@ -7,6 +7,12 @@ import gateway_manager
 
 
 class PanelTests(unittest.TestCase):
+    def test_xray_reset_cli_delegates_to_guarded_manager_action(self):
+        with patch.object(panel.os, "geteuid", return_value=0, create=True), \
+             patch("services_manager.xray_reset_from_scratch", return_value=True) as reset:
+            self.assertEqual(panel.main(["--xray-reset"]), 0)
+        reset.assert_called_once_with()
+
     def test_expected_protocols_are_listed(self):
         self.assertEqual(
             {p.key for p in panel.PROTOCOLS},

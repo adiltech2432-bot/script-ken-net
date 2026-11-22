@@ -250,6 +250,107 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         self.assertFalse(any(item.get("protocol") == "api" for item in config["outbounds"]))
         self.assertFalse(services._ensure_xray_online_stats(config))
 
+    def test_xray_add_normalizes_display_protocol_and_username_before_validation(self):
+        import gateway_manager
+
+        config = {"inbounds": []}
+        state = {"domain": "vpn.example.com", "accounts": {}}
+        with patch.object(services, "state", return_value=state), \
+             patch.object(services, "get_xray_config", return_value=config), \
+             patch.object(services.Path, "is_file", return_value=True), \
+             patch.object(gateway_manager, "is_ready", return_value=(True, "ready")), \
+             patch.object(services, "_write_xray"), \
+             patch.object(services, "_atomic"), \
+             patch.object(services, "install_expiry_timer"):
+            credential = services.xray_add(" Trojan ", " trojan22 ", 30)
+
+        self.assertEqual(credential, "trojan22")
+        self.assertEqual(state["accounts"]["trojan22"]["protocol"], "trojan")
+
+    def test_xray_online_ip_counts_fetches_all_accounts_once_with_timeout(self):
+        config = {"inbounds": [{"tag": "kennet-api", "port": 10085}]}
+        response = {"users": [
+            {"email": "alice", "ips": [{"ip": "198.51.100.1"}, {"ip": "198.51.100.2"}]},
+            {"email": "bob", "ips": []},
+        ]}
+        command = SimpleNamespace(returncode=0, stdout=json.dumps(response), stderr="")
+        with patch.object(services, "get_xray_config", return_value=config), \
+             patch.object(services, "xray_list", return_value=["alice", "bob"]), \
+             patch.object(services.subprocess, "run", return_value=command) as run, \
+             patch.object(services.time, "monotonic", return_value=1000):
+            services._xray_online_ip_cache = None
+            counts = services.xray_online_ip_counts("trojan")
+            services._xray_online_ip_cache = None
+
+        self.assertEqual(counts, {"alice": 2, "bob": 0})
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("-all", run.call_args.args[0])
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_xray_dashboard_stats_refresh_does_not_block_caller(self):
+        import threading
+        import time as wall_time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_query(_protocol):
+            started.set()
+            release.wait(2)
+            return {"alice": 1}
+
+        services._invalidate_xray_online_cache()
+        try:
+            with patch.object(services, "xray_list", return_value=["alice"]), \
+                 patch.object(services, "xray_online_ip_counts", side_effect=slow_query):
+                before = wall_time.perf_counter()
+                services.refresh_xray_online_ip_counts_async()
+                elapsed = wall_time.perf_counter() - before
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(started.wait(1))
+        finally:
+            release.set()
+            self.assertTrue(services._xray_online_refresh_lock.acquire(timeout=1))
+            services._xray_online_refresh_lock.release()
+
+    def test_xray_reset_replaces_configuration_and_removes_only_xray_test_accounts(self):
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_path = root / "xray" / "config.json"
+            config_path.parent.mkdir()
+            config_path.write_text(json.dumps({
+                "api": {"tag": "legacy"}, "inbounds": [{"tag": "old", "protocol": "vless"}],
+                "outbounds": [{"tag": "api", "protocol": "api"}],
+            }))
+            state_path = root / "services.json"
+            state_path.write_text(json.dumps({"domain": "vpn.example.com", "accounts": {
+                "alice": {"protocol": "trojan"}, "sshuser": {"protocol": "ssh"}}}))
+            expired_path = root / "expired.json"
+            expired_path.write_text(json.dumps({"trojan:old": {"username": "old", "protocol": "trojan"},
+                                                "ssh:oldssh": {"username": "oldssh", "protocol": "ssh"}}))
+            with patch.object(services, "XRAY_CONFIG", config_path), \
+                 patch.object(services, "STATE", state_path), \
+                 patch.object(services, "EXPIRED_STATE", expired_path), \
+                 patch.object(services.shutil, "which", return_value="/usr/bin/xray"), \
+                 patch("builtins.input", return_value="RESET XRAY"), \
+                 patch.object(services.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=0, stdout="active", stderr="")) as run:
+                services.xray_reset_from_scratch()
+
+            fresh_config = json.loads(config_path.read_text())
+            fresh_state = json.loads(state_path.read_text())
+            fresh_expired = json.loads(expired_path.read_text())
+
+        self.assertEqual(fresh_state["accounts"], {"sshuser": {"protocol": "ssh"}})
+        self.assertEqual(fresh_expired, {"ssh:oldssh": {"username": "oldssh", "protocol": "ssh"}})
+        self.assertEqual([inbound["tag"] for inbound in fresh_config["inbounds"]], ["kennet-api"])
+        self.assertTrue(all(item["protocol"] != "api" for item in fresh_config["outbounds"]))
+        self.assertEqual(fresh_config["api"]["services"], ["StatsService"])
+        self.assertTrue(fresh_config["policy"]["levels"]["0"]["statsUserOnline"])
+        self.assertTrue(any(call.args[0] == ["systemctl", "restart", "xray"] for call in run.mock_calls))
+
     def test_default_outbound_repair_preserves_existing_custom_outbounds(self):
         config = {"outbounds": [{"tag": "proxy", "protocol": "socks"}]}
         self.assertFalse(services._ensure_default_xray_outbound(config))
