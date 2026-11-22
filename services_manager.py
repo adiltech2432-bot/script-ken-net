@@ -765,8 +765,15 @@ def _ensure_xray_online_stats(cfg: dict) -> bool:
         outbounds = []
         cfg["outbounds"] = outbounds
         changed = True
+    # The API is exposed by cfg["api"] and routed to a normal outbound. Xray
+    # has no outbound protocol named "api"; old panel builds wrote that invalid
+    # protocol and caused Xray to reject the entire config on account creation.
     api_outbound = next((item for item in outbounds
-                         if isinstance(item, dict) and item.get("protocol") == "api"), None)
+                         if isinstance(item, dict) and item.get("tag") == "api"), None)
+    if api_outbound is not None and api_outbound.get("protocol") == "api":
+        api_outbound["protocol"] = "freedom"
+        api_outbound.pop("settings", None)
+        changed = True
     if api_outbound is None:
         api_outbound_tag = "api"
         if any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
@@ -775,7 +782,7 @@ def _ensure_xray_online_stats(cfg: dict) -> bool:
             while any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
                 suffix += 1
                 api_outbound_tag = f"kennet-api-outbound-{suffix}"
-        api_outbound = {"tag": api_outbound_tag, "protocol": "api"}
+        api_outbound = {"tag": api_outbound_tag, "protocol": "freedom"}
         outbounds.append(api_outbound)
         changed = True
     api_outbound_tag = str(api_outbound.get("tag", "api"))
@@ -905,13 +912,16 @@ def ssh_session_sources() -> dict[str, list[str]]:
     processes = subprocess.run(["ps", "-eo", "user=,pid=,args="], capture_output=True, text=True, check=False)
     pid_users: dict[str, str] = {}
     for line in processes.stdout.splitlines():
-        match = re.match(r"\s*(\S+)\s+(\d+)\s+.*?sshd:\s+([A-Za-z0-9_]{3,32})@", line)
-        if match:
-            pid_users[match.group(2)] = match.group(3)
-        else:
-            match = re.match(r"\s*(\S+)\s+(\d+)\s+", line)
-            if match:
-                pid_users[match.group(2)] = match.group(1)
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3 or not fields[1].isdigit():
+            continue
+        process_title = fields[2]
+        # OpenSSH may title a login child as "sshd: user@notty/pts/N" or
+        # "sshd: user [priv]/[net]". Do not infer the login from the OS owner:
+        # the master sshd runs as root and would misattribute sessions.
+        match = re.match(r"^sshd:\s+([A-Za-z0-9_.-]{1,32})(?:@|\s+\[(?:priv|net|pam)\])", process_title)
+        if match and match.group(1) in managed:
+            pid_users[fields[1]] = match.group(1)
     for line in sockets.stdout.splitlines():
         pids = re.findall(r"pid=(\d+)", line)
         user = next((pid_users.get(pid) for pid in pids if pid_users.get(pid) in managed), None)

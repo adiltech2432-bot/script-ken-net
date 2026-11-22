@@ -58,6 +58,23 @@ bob 122 sshd: bob@notty
         self.assertEqual(counts, {"alice": 2, "bob": 1})
         self.assertEqual(sources, {"alice": ["198.51.100.7"], "bob": ["198.51.100.8"]})
 
+    def test_ssh_sessions_accept_priv_and_net_process_titles_but_ignore_master(self):
+        sockets = '''ESTAB 0 0 192.0.2.10:22 198.51.100.7:41001 users:("sshd",pid=120,fd=3)
+ESTAB 0 0 192.0.2.10:22 198.51.100.7:41002 users:("sshd",pid=121,fd=3)
+ESTAB 0 0 192.0.2.10:22 198.51.100.8:41003 users:("sshd",pid=122,fd=3)
+'''
+        processes = '''alice 120 sshd: alice [priv]
+alice 121 sshd: alice [net]
+root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+'''
+
+        def run(command, **_kwargs):
+            return SimpleNamespace(stdout=sockets if command[0] == "ss" else processes)
+
+        with patch.object(services, "ssh_list", return_value=["alice"]), \
+             patch.object(services.subprocess, "run", side_effect=run):
+            self.assertEqual(services.ssh_session_counts(), {"alice": 2})
+
     def test_expiry_purge_locks_and_removes_expired_ssh_account_and_archives_it(self):
         from datetime import date, timedelta
         from pathlib import Path
@@ -212,13 +229,26 @@ bob 122 sshd: bob@notty
 
         self.assertEqual(saved["outbounds"], [
             {"protocol": "freedom", "tag": "direct"},
-            {"tag": "api", "protocol": "api"},
+            {"tag": "api", "protocol": "freedom"},
         ])
         self.assertEqual(saved["inbounds"][0], initial["inbounds"][0])
         api_inbound = next(item for item in saved["inbounds"] if item.get("tag") == "kennet-api")
         self.assertEqual(api_inbound["listen"], "127.0.0.1")
         self.assertEqual(api_inbound["protocol"], "dokodemo-door")
         self.assertIn(["systemctl", "restart", "xray"], [call.args[0] for call in run.mock_calls])
+
+    def test_xray_stats_repairs_legacy_invalid_api_outbound_idempotently(self):
+        config = {
+            "inbounds": [{"tag": "api", "protocol": "dokodemo-door", "listen": "127.0.0.1",
+                          "port": 10085, "settings": {"address": "127.0.0.1"}}],
+            "outbounds": [{"tag": "api", "protocol": "api"}, {"tag": "direct", "protocol": "freedom"}],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
+        }
+
+        self.assertTrue(services._ensure_xray_online_stats(config))
+        self.assertEqual(config["outbounds"][0], {"tag": "api", "protocol": "freedom"})
+        self.assertFalse(any(item.get("protocol") == "api" for item in config["outbounds"]))
+        self.assertFalse(services._ensure_xray_online_stats(config))
 
     def test_default_outbound_repair_preserves_existing_custom_outbounds(self):
         config = {"outbounds": [{"tag": "proxy", "protocol": "socks"}]}
