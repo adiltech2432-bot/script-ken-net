@@ -16,6 +16,7 @@ import time
 import secrets
 import getpass
 import json
+import socket
 from pathlib import Path
 from collections import deque
 from dataclasses import dataclass
@@ -178,6 +179,24 @@ def collect_rows() -> tuple[list[Row], dict[str, object]]:
     except (ImportError, AttributeError, OSError, ValueError, RuntimeError):
         counts["openvpn"] = None
 
+    online: dict[str, int | None] = {key: None for key in PROTOCOL_ORDER}
+    if services_manager is not None:
+        for key in ("ssh", "vmess", "vless", "trojan"):
+            try:
+                per_account = services_manager.active_connections(key)
+                online[key] = sum(per_account.values())
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                online[key] = None
+        try:
+            online["ssh"] = sum(services_manager.ssh_session_counts().values())
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            online["ssh"] = None
+    try:
+        server_card = _server_info_card(domain)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        server_card = {key: "Not configured" for key in
+                       ("expiration", "isp", "city", "ip", "nameserver", "owner")}
+
     rows: list[Row] = []
     for group, color, keys in GROUPS:
         for key in keys:
@@ -204,9 +223,30 @@ def collect_rows() -> tuple[list[Row], dict[str, object]]:
             rows.append(Row(key, title, group, color, status, detail, count, engine, ports))
     active_services = sum(1 for row in rows if row.state in {"Active", "Service active"})
     _activity.append(active_services)
-    return rows, {"domain": domain, "accounts": accounts, "counts": counts,
+    return rows, {"domain": domain, "accounts": accounts, "counts": counts, "online": online,
+                  "server_info": server_card,
                   "load": _load_percent(), "ram": _ram_percent(), "disk": _disk_percent(),
                   "uptime": _uptime(), "os": _ubuntu_release(), "active": active_services}
+
+
+def _server_info_card(domain: str) -> dict[str, str]:
+    """Collect locally available server facts; never invent provider metadata."""
+    result = {"expiration": "Not configured", "isp": "Not configured", "city": "Not configured",
+              "ip": "Not configured", "nameserver": "Not configured", "owner": "Not configured"}
+    try:
+        import dnstt_manager
+        cfg = dnstt_manager._read_json(dnstt_manager.CONFIG, {})
+        result["nameserver"] = str(cfg.get("nameserver_host") or "Not configured")
+    except (ImportError, AttributeError, OSError, ValueError, RuntimeError):
+        pass
+    try:
+        route = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True,
+                               text=True, timeout=2, check=False).stdout.split()
+        if "src" in route:
+            result["ip"] = route[route.index("src") + 1]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    return result
 
 
 def _configured_listeners(protocol: str) -> str:
@@ -422,42 +462,33 @@ class Dashboard:
         title_x = max(18, (width - len(title)) // 2)
         self.put(0, title_x, title, "fill_brand", bold=True,
                  width=max(8, width - title_x - 3))
-        os_name = str(self.snapshot.get("os", "Ubuntu"))
-        self.put(1, 1, os_name, "dim", width=max(16, width // 2))
-        domain = str(self.snapshot.get("domain", "—"))
-        self.put(1, max(1, width - len(domain) - 3), domain, "rose", bold=True)
+        # Keep the title as a clean two-row brand plate; detailed host facts
+        # are shown once in the information card below.
+        self.put(1, bar_x, " " * bar_width, "fill_brand", width=bar_width)
 
     def _server_details(self, y: int, width: int, summary_width: int = 62) -> None:
-        """Show a compact live host inventory alongside the account summary."""
+        """Show the requested host/account inventory without fabricated values."""
         x = summary_width + 3
         pane_width = width - x - 1
         if pane_width < 28:
             return
-        self._box(y, x, 9, pane_width, "SERVER DETAILS", "mint")
-        try:
-            disk = shutil.disk_usage("/")
-            disk_total = f"{disk.total // (1024 ** 3)} GB"
-            disk_free = f"{disk.free // (1024 ** 3)} GB free"
-        except OSError:
-            disk_total, disk_free = "unknown", "unknown"
-        try:
-            os_info = platform.freedesktop_os_release()
-            os_name = f"{os_info.get('NAME', 'Linux')} {os_info.get('VERSION_ID', '')}".strip()
-        except (AttributeError, OSError):
-            os_name = str(self.snapshot.get("os", "Linux"))
-        cpu = platform.processor() or platform.machine() or "unknown"
+        self._box(y, x, 12, pane_width, "SERVER INFORMATION", "mint")
+        info = self.snapshot.get("server_info", {})
         details = (
-            ("OS", os_name),
-            ("KERNEL", platform.release()),
-            ("ARCH", platform.machine() or "unknown"),
-            ("CPU", f"{os.cpu_count() or 1} cores · {cpu}"),
-            ("MEMORY", f"{self.snapshot.get('ram', '—')}% used"),
-            ("DISK", f"{disk_total} · {disk_free}"),
-            ("HOST", platform.node() or "unknown"),
+            ("SYS OS", self.snapshot.get("os", "Not configured")),
+            ("EXPIRATION", info.get("expiration", "Not configured")),
+            ("RAM", f"{self.snapshot.get('ram', '—')}%"),
+            ("UP", self.snapshot.get("uptime", "Not configured")),
+            ("ISP", info.get("isp", "Not configured")),
+            ("CITY", info.get("city", "Not configured")),
+            ("IP", info.get("ip", "Not configured")),
+            ("DOMAIN", self.snapshot.get("domain", "—")),
+            ("NS", info.get("nameserver", "Not configured")),
+            ("OWNER", info.get("owner", "Not configured")),
         )
         for line, (label, value) in enumerate(details, 1):
-            self.put(y + line, x + 2, label, "dim", bold=True, width=9)
-            self.put(y + line, x + 12, value, "text", width=pane_width - 14)
+            self.put(y + line, x + 2, label, "dim", bold=True, width=12)
+            self.put(y + line, x + 15, str(value), "text", width=pane_width - 17)
 
     def _metric_line(self, width: int) -> None:
         items = (("LOAD", self.snapshot.get("load")), ("RAM", self.snapshot.get("ram")),
@@ -497,12 +528,14 @@ class Dashboard:
                 active = row.state in {"Active", "Service active"}
                 state = "online" if active else "check" if "Partial" in row.state else "offline"
                 color = "ok" if active else "amber" if state == "check" else "dim"
-                noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "IPs" if key in {"vmess", "vless", "trojan"} else "online"
-                count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
+                noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "acc"
+                count = str(self.snapshot.get("counts", {}).get(key, "—"))
+                connected = self.snapshot.get("online", {}).get(key)
+                connection_text = "? online" if connected is None else f"{connected} online"
                 self.put(y + 2 + line, 3, "●" if not self.ascii else "*", color, bold=True)
                 self.put(y + 2 + line, 5, row.title.upper(), "text", bold=True, width=14)
                 self.put(y + 2 + line, 21, state, color, width=9)
-                self.put(y + 2 + line, 31, f"{count} {noun}", color, width=box_width - 34)
+                self.put(y + 2 + line, 31, f"{count} {noun} · {connection_text}", color, width=box_width - 34)
             return
 
         self._box(y, 1, 6, width - 2, "SERVER & ACCOUNT STATUS", "blue")
@@ -521,12 +554,14 @@ class Dashboard:
             active = row.state in {"Active", "Service active"}
             state = "ONLINE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
             color = "ok" if active else "amber" if state == "CHECK" else "dim"
-            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "IPs" if key in {"vmess", "vless", "trojan"} else "online"
-            count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
+            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "acc"
+            count = str(self.snapshot.get("counts", {}).get(key, "—"))
+            connected = self.snapshot.get("online", {}).get(key)
+            connection_text = "? online" if connected is None else f"{connected} online"
             self.put(y + 2 + line, x, "●" if not self.ascii else "*", color, bold=True)
             self.put(y + 2 + line, x + 2, row.title.upper(), "text", bold=True,
                      width=min(15, half // 3))
-            self.put(y + 2 + line, x + min(18, half // 2), f"{state:<7} {count} {noun}", color,
+            self.put(y + 2 + line, x + min(18, half // 2), f"{state:<7} {count} {noun} · {connection_text}", color,
                      width=max(12, half - min(20, half // 2)))
 
     def _protocol_grid(self, top: int, width: int, *, compact: bool) -> None:
@@ -896,6 +931,13 @@ class Dashboard:
         except (KeyboardInterrupt, EOFError):
             self.toast = "OK  Action cancelled"
         except Exception as exc:
+            # The previous toast vanished as soon as the curses screen was
+            # restored, hiding account-manager failures from the operator.
+            try:
+                print(f"\nOperation failed: {exc}")
+                input("Press Enter to return...")
+            except (EOFError, KeyboardInterrupt):
+                pass
             self.toast = f"ERROR  {exc}"
         finally:
             try:
@@ -1253,7 +1295,7 @@ class Dashboard:
         # three for the footer before switching to the condensed presentation.
         compact = height < 44
         self.single_line_cards = height < 34
-        grid_top = 13 if detailed_summary else 10
+        grid_top = 16 if detailed_summary else 10
         columns = 2 if width >= 72 else 1
         rows_per_col = (len(PROTOCOL_ORDER) + columns - 1) // columns
         footer_y = height - 3

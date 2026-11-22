@@ -579,8 +579,8 @@ ExecStart=/usr/bin/python3 /opt/kennet-panel/services_manager.py --expire
     timer = """[Unit]
 Description=Periodic Kennet account expiry check
 [Timer]
-OnBootSec=15s
-OnUnitActiveSec=15s
+OnBootSec=5s
+OnUnitActiveSec=5s
 Persistent=true
 [Install]
 WantedBy=timers.target
@@ -589,7 +589,7 @@ WantedBy=timers.target
     _atomic(Path("/etc/systemd/system/kennet-account-expiry.timer"), timer, 0o644)
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", "kennet-account-expiry.timer"])
-    # Restart so an already-installed timer picks up the 15-second cadence.
+    # Restart so an already-installed timer picks up the 5-second cadence.
     _run(["systemctl", "restart", "kennet-account-expiry.timer"])
 
 

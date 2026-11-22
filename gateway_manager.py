@@ -326,13 +326,10 @@ def is_ready() -> tuple[bool, str]:
     """
     missing = [unit for unit in ("haproxy", "nginx")
                if subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False).returncode]
-    ports = {80, 443, 8080, 8081, 8443}
-    try:
-        domain = services_manager.state().get("domain", "")
-        if domain and Path(f"/etc/haproxy/certs/{domain}.pem").is_file():
-            ports.add(8444)
-    except (OSError, ValueError):
-        pass
+    # 8080 is the optional SSH WebSocket listener, and 8444 is an internal
+    # TLS termination socket. Neither is required for Xray's public WS/gRPC
+    # routes. The public gateway needs HTTP/TLS plus Nginx's local upstreams.
+    ports = {80, 443, 8081, 8443}
     if missing:
         return False, "Inactive gateway services: " + ", ".join(missing)
     listeners = subprocess.run(["ss", "-Hlnt"], text=True, capture_output=True, check=False).stdout

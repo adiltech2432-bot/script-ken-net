@@ -158,8 +158,8 @@ bob 122 sshd: bob@notty
             services.install_expiry_timer()
 
         timer = next(text for path, text in captured.items() if path.endswith("kennet-account-expiry.timer"))
-        self.assertIn("OnBootSec=15s", timer)
-        self.assertIn("OnUnitActiveSec=15s", timer)
+        self.assertIn("OnBootSec=5s", timer)
+        self.assertIn("OnUnitActiveSec=5s", timer)
 
     def test_expired_linux_login_is_locked_and_sessions_are_terminated_before_deletion(self):
         calls = []
