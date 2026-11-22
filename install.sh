@@ -102,8 +102,14 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import services_manager
 
-if services_manager.ensure_xray_default_outbound():
-    print("Repaired Xray: added the missing direct freedom outbound.")
+try:
+    outbound_updated, stats_updated = services_manager.configure_xray_online_stats()
+    if outbound_updated:
+        print("Repaired Xray: added the missing direct freedom outbound.")
+    if stats_updated:
+        print("Enabled Xray per-account online IP statistics through a loopback-only API.")
+except Exception as exc:
+    print(f"Warning: Xray per-account online statistics were not enabled: {exc}", file=sys.stderr)
 PY
 fi
 

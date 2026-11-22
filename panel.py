@@ -115,13 +115,23 @@ def dashboard() -> None:
         live_ssh = len(services_manager.active_connections("ssh"))
     except (ImportError, OSError, ValueError):
         live_ssh = 0
+    xray_online: dict[str, int | None] = {key: None for key in ("vless", "vmess", "trojan")}
     try:
         import services_manager
-        xray_online = {key: services_manager.active_connections(key).get("active connections (not unique users)", 0) for key in ("vless", "vmess", "trojan")}
-    except (ImportError, OSError, ValueError):
-        xray_online = {key: 0 for key in ("vless", "vmess", "trojan")}
-    print(f"{terminal_ui.GREEN}SSH {live_ssh}/{totals['ssh']}  VMESS {xray_online['vmess']}/{totals['vmess']}  "
-          f"VLESS {xray_online['vless']}/{totals['vless']}  TROJAN {xray_online['trojan']}/{totals['trojan']}{terminal_ui.RESET}")
+        for key in xray_online:
+            try:
+                xray_online[key] = sum(services_manager.active_connections(key).values())
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                pass
+    except ImportError:
+        pass
+    def online_ips(protocol: str) -> str:
+        count = xray_online[protocol]
+        return "? IPs" if count is None else f"{count} IPs"
+    print(f"{terminal_ui.GREEN}SSH {live_ssh}/{totals['ssh']} online  "
+          f"VMESS {online_ips('vmess')}/{totals['vmess']} accounts  "
+          f"VLESS {online_ips('vless')}/{totals['vless']} accounts{terminal_ui.RESET}")
+    print(f"{terminal_ui.GREEN}TROJAN {online_ips('trojan')}/{totals['trojan']} accounts{terminal_ui.RESET}")
     print(f"{terminal_ui.GREEN}WIREGUARD {wg_online}/{wg_total} peers  DNSTT {dnstt_ready}/{dnstt_total} active endpoints{terminal_ui.RESET}")
     protocol_options = [("01", "◆ SSH"), ("02", "◉ VMESS"), ("03", "◇ VLESS"), ("04", "● TROJAN"),
                         ("05", "▧ SHADOWSOCKS"), ("06", "▣ DROPBEAR"), ("07", "◍ OPENVPN"),

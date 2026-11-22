@@ -215,7 +215,10 @@ def account_roster(title: str, rows: list[dict[str, object]], *, note: str = "")
             name = name[:name_width - 1] + "…"
         if len(expires) > 10:
             expires = expires[:10]
-        connection_color = GREEN if connection in {"ONLINE", "CONNECTED", "RUNNING", "RECENT"} or connection.endswith(" SESSIONS") else YELLOW if connection in {"UNKNOWN", "N/A"} else RESET
+        numeric_count = connection.split(maxsplit=1)[0] if connection else ""
+        has_live_count = numeric_count.isdigit() and int(numeric_count) > 0 and (
+            connection.endswith((" SESSIONS", " IP", " IPS")))
+        connection_color = GREEN if connection in {"ONLINE", "CONNECTED", "RUNNING", "RECENT"} or has_live_count else YELLOW if connection in {"UNKNOWN", "N/A"} else RESET
         status_color = GREEN if status == "ACTIVE" else MAGENTA if status == "EXPIRED" else YELLOW
         print(f"{CYAN}{index:>3}{RESET}  {name:<{name_width}}  {connection_color}{connection:<12}{RESET}  {status_color}{status:<10}{RESET}  {expires:<10}")
         detail = row.get("details")

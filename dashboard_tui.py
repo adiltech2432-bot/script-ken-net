@@ -462,7 +462,7 @@ class Dashboard:
                 active = row.state in {"Active", "Service active"}
                 state = "online" if active else "check" if "Partial" in row.state else "offline"
                 color = "ok" if active else "amber" if state == "check" else "dim"
-                noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "sessions" if key in {"vmess", "vless", "trojan"} else "online"
+                noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "IPs" if key in {"vmess", "vless", "trojan"} else "online"
                 count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
                 self.put(y + 2 + line, 3, "●" if not self.ascii else "*", color, bold=True)
                 self.put(y + 2 + line, 5, row.title.upper(), "text", bold=True, width=14)
@@ -486,7 +486,7 @@ class Dashboard:
             active = row.state in {"Active", "Service active"}
             state = "ONLINE" if active else "CHECK" if "Partial" in row.state else "OFFLINE"
             color = "ok" if active else "amber" if state == "CHECK" else "dim"
-            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "sessions" if key in {"vmess", "vless", "trojan"} else "online"
+            noun = "peers" if key == "wireguard" else "services" if key == "dnstt" else "IPs" if key in {"vmess", "vless", "trojan"} else "online"
             count = row.count.replace(" accounts", "").replace(" endpoints", "").replace(" peers", "")
             self.put(y + 2 + line, x, "●" if not self.ascii else "*", color, bold=True)
             self.put(y + 2 + line, x + 2, row.title.upper(), "text", bold=True,
@@ -646,8 +646,9 @@ class Dashboard:
                 return services_manager.account_roster_rows("udp", names)
             if key in {"vmess", "vless", "trojan", "shadowsocks"}:
                 names = services_manager.selectable_account_names(key)
-                return services_manager.account_roster_rows(key, names,
-                    connection_unknown="Shared Xray gateway; per-account sessions unavailable")
+                connections = services_manager.active_connections(key)
+                return services_manager.account_roster_rows(
+                    key, names, connections=connections, connection_unit="IP")
             def expiry(record: dict) -> str:
                 try:
                     import terminal_ui

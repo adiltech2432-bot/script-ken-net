@@ -169,7 +169,7 @@ def restore_expired_account(protocol: str, username: str, days: int) -> str | No
 
 
 def account_roster_rows(protocol: str, names: list[str], *, connections: dict[str, int] | None = None,
-                        connection_unknown: str = "") -> list[dict[str, object]]:
+                        connection_unknown: str = "", connection_unit: str = "SESSIONS") -> list[dict[str, object]]:
     """Build truthful per-account rows, including retained expiry history."""
     import terminal_ui
     data = state().get("accounts", {})
@@ -178,7 +178,18 @@ def account_roster_rows(protocol: str, names: list[str], *, connections: dict[st
     for username in sorted(active_names, key=str.casefold):
         record = data.get(username, {})
         count = (connections or {}).get(username)
-        connection = f"{count} SESSIONS" if count else ("OFFLINE" if connections is not None else "UNKNOWN")
+        if connections is None:
+            connection = "UNKNOWN"
+        else:
+            count = int(count or 0)
+            unit = connection_unit.upper()
+            if unit in {"IP", "IPS"}:
+                label = "IP" if count == 1 else "IPs"
+            elif unit in {"SESSION", "SESSIONS"}:
+                label = "session" if count == 1 else "sessions"
+            else:
+                label = unit if count == 1 else f"{unit}s"
+            connection = f"{count} {label}"
         details = "TRIAL account" if record.get("trial") else "Regular account"
         if record.get("max_ips"):
             details += f" · IP limit {record['max_ips']}"
@@ -673,15 +684,200 @@ def account_details(protocol: str, username: str) -> dict:
     return {"username": username, **record}
 
 
+def _ensure_xray_online_stats(cfg: dict) -> bool:
+    """Enable Xray's local-only online-IP stats API without changing client transports."""
+    changed = False
+    if not isinstance(cfg.get("stats"), dict):
+        cfg["stats"] = {}
+        changed = True
+
+    api = cfg.setdefault("api", {})
+    if not isinstance(api, dict):
+        api = {}
+        cfg["api"] = api
+        changed = True
+    services = api.setdefault("services", [])
+    if not isinstance(services, list):
+        services = []
+        api["services"] = services
+        changed = True
+    if "StatsService" not in services:
+        services.append("StatsService")
+        changed = True
+
+    inbounds = cfg.setdefault("inbounds", [])
+    if not isinstance(inbounds, list):
+        inbounds = []
+        cfg["inbounds"] = inbounds
+        changed = True
+    api_inbound = next((item for item in inbounds
+                        if isinstance(item, dict) and item.get("tag") == "kennet-api"
+                        and item.get("protocol") == "dokodemo-door"), None)
+    if api_inbound is None:
+        # Reuse a conventional loopback API listener where possible; otherwise
+        # allocate a free local-only port. Never bind the management API publicly.
+        api_inbound = next((item for item in inbounds
+                            if isinstance(item, dict) and item.get("protocol") == "dokodemo-door"
+                            and item.get("listen") in ("127.0.0.1", "::1")
+                            and item.get("tag") == "api"), None)
+        if api_inbound is None:
+            used = {int(item.get("port", 0)) for item in inbounds if isinstance(item, dict)
+                    and str(item.get("port", "")).isdigit()}
+            port = None
+            for candidate in range(10085, 10186):
+                if candidate in used:
+                    continue
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    probe.bind(("127.0.0.1", candidate))
+                except OSError:
+                    continue
+                finally:
+                    probe.close()
+                port = candidate
+                break
+            if port is None:
+                raise RuntimeError("No free loopback port is available for Xray online statistics API")
+            api_inbound = {"tag": "kennet-api", "listen": "127.0.0.1", "port": port,
+                           "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}}
+            inbounds.append(api_inbound)
+            changed = True
+    if api_inbound.get("listen") != "127.0.0.1":
+        api_inbound["listen"] = "127.0.0.1"
+        changed = True
+    settings = api_inbound.setdefault("settings", {})
+    if not isinstance(settings, dict):
+        settings = {}
+        api_inbound["settings"] = settings
+        changed = True
+    if settings.get("address") != "127.0.0.1":
+        settings["address"] = "127.0.0.1"
+        changed = True
+    api_port = int(api_inbound["port"])
+    api_tag = str(api_inbound.get("tag", "kennet-api"))
+    if api.get("tag") != api_tag:
+        api["tag"] = api_tag
+        changed = True
+
+    # Xray requires an API outbound and a routing rule to deliver API calls to it.
+    outbounds = cfg.setdefault("outbounds", [])
+    if not isinstance(outbounds, list):
+        outbounds = []
+        cfg["outbounds"] = outbounds
+        changed = True
+    api_outbound = next((item for item in outbounds
+                         if isinstance(item, dict) and item.get("protocol") == "api"), None)
+    if api_outbound is None:
+        api_outbound_tag = "api"
+        if any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
+            api_outbound_tag = "kennet-api-outbound"
+            suffix = 1
+            while any(isinstance(item, dict) and item.get("tag") == api_outbound_tag for item in outbounds):
+                suffix += 1
+                api_outbound_tag = f"kennet-api-outbound-{suffix}"
+        api_outbound = {"tag": api_outbound_tag, "protocol": "api"}
+        outbounds.append(api_outbound)
+        changed = True
+    api_outbound_tag = str(api_outbound.get("tag", "api"))
+
+    routing = cfg.setdefault("routing", {})
+    if not isinstance(routing, dict):
+        routing = {}
+        cfg["routing"] = routing
+        changed = True
+    rules = routing.setdefault("rules", [])
+    if not isinstance(rules, list):
+        rules = []
+        routing["rules"] = rules
+        changed = True
+    api_rule = {"type": "field", "inboundTag": [api_tag], "outboundTag": api_outbound_tag}
+    if api_rule not in rules:
+        rules.insert(0, api_rule)
+        changed = True
+
+    policy = cfg.setdefault("policy", {})
+    if not isinstance(policy, dict):
+        policy = {}
+        cfg["policy"] = policy
+        changed = True
+    levels = policy.setdefault("levels", {})
+    if not isinstance(levels, dict):
+        levels = {}
+        policy["levels"] = levels
+        changed = True
+    client_levels = {str(client.get("level", 0))
+                     for inbound in inbounds if isinstance(inbound, dict)
+                     for client in (((inbound.get("settings") or {}).get("clients") or [])
+                                    if isinstance(inbound.get("settings") or {}, dict) else [])
+                     if isinstance(client, dict)}
+    client_levels.add("0")
+    for level in client_levels:
+        level_policy = levels.setdefault(level, {})
+        if not isinstance(level_policy, dict):
+            level_policy = {}
+            levels[level] = level_policy
+            changed = True
+        if level_policy.get("statsUserOnline") is not True:
+            level_policy["statsUserOnline"] = True
+            changed = True
+
+    return changed
+
+
+def _xray_api_port(cfg: dict) -> int:
+    inbound = next((item for item in cfg.get("inbounds", [])
+                    if item.get("tag") == "kennet-api"), None)
+    if inbound is None:
+        inbound = next((item for item in cfg.get("inbounds", [])
+                        if item.get("protocol") == "dokodemo-door"
+                        and item.get("listen") == "127.0.0.1" and item.get("tag") == "api"), None)
+    return int(inbound["port"]) if inbound else 0
+
+
+def xray_online_ip_counts(protocol: str) -> dict[str, int]:
+    """Return Xray's active client IP count by account email."""
+    if protocol not in XRAY_PORTS:
+        raise ValueError(f"Connection counting is not implemented for {protocol}")
+    cfg = get_xray_config()
+    port = _xray_api_port(cfg)
+    if not port:
+        raise RuntimeError("Xray online-statistics API is not configured; reinstall/configure Xray first")
+    counts: dict[str, int] = {}
+    for username in xray_list(protocol):
+        result = subprocess.run(["xray", "api", "statsonlineiplist", f"--server=127.0.0.1:{port}",
+                                 "-email", username], capture_output=True, text=True, check=False, timeout=8)
+        if result.returncode:
+            raise RuntimeError((result.stderr or result.stdout or "Xray online statistics query failed").strip())
+        output = (result.stdout or "").strip()
+        if not output:
+            counts[username] = 0
+            continue
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Xray online statistics returned unreadable data") from exc
+        ips = payload.get("ips") if isinstance(payload, dict) else None
+        if isinstance(ips, list):
+            # Xray's API returns repeated OnlineIPEntry objects, not a map.
+            addresses = {
+                entry.get("ip")
+                for entry in ips
+                if isinstance(entry, dict) and isinstance(entry.get("ip"), str) and entry["ip"]
+            }
+        elif isinstance(ips, dict):
+            # Keep compatibility with wrappers that serialize IP entries as a map.
+            addresses = {str(address) for address in ips if address}
+        else:
+            raise RuntimeError("Xray online-IP response did not contain an IP list")
+        counts[username] = len(addresses)
+    return counts
+
+
 def active_connections(protocol: str) -> dict[str, int]:
     if protocol in {"ssh", "udp"}:
         return ssh_session_counts() if protocol == "ssh" else {}
     if protocol in XRAY_PORTS:
-        rows = set()
-        for port, _network, _path in XRAY_LAYOUT[protocol]:
-            result = subprocess.run(["ss", "-Htn", "state", "established", "sport", "=", f":{port}"], capture_output=True, text=True, check=False)
-            rows.update(result.stdout.splitlines())
-        return {"active connections (not unique users)": len(rows)}
+        return xray_online_ip_counts(protocol)
     raise ValueError(f"Connection counting is not implemented for {protocol}")
 
 
@@ -780,15 +976,16 @@ def xray_install() -> None:
     migrated = _migrate_legacy_xray_inbounds(config)
     transport_updated = _refresh_managed_transports(config)
     outbound_updated = _ensure_default_xray_outbound(config)
-    if migrated or transport_updated or outbound_updated:
+    stats_updated = _ensure_xray_online_stats(config)
+    if migrated or transport_updated or outbound_updated or stats_updated:
         _atomic(XRAY_CONFIG, json.dumps(config, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
     if check.returncode:
-        if migrated or transport_updated or outbound_updated:
+        if migrated or transport_updated or outbound_updated or stats_updated:
             _atomic(XRAY_CONFIG, original, 0o644)
         raise RuntimeError((check.stderr or check.stdout or "Xray configuration validation failed").strip())
     _run(["systemctl", "enable", "xray"])
-    _run(["systemctl", "restart" if migrated or transport_updated or outbound_updated else "start", "xray"])
+    _run(["systemctl", "restart" if migrated or transport_updated or outbound_updated or stats_updated else "start", "xray"])
     active = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True, check=False)
     if active.returncode:
         raise RuntimeError("Xray was installed, but xray.service did not become active; inspect: journalctl -u xray -n 80 --no-pager")
@@ -798,6 +995,8 @@ def xray_install() -> None:
         print("Updated managed WebSocket/gRPC transport paths to match the current client profiles.")
     if outbound_updated:
         print("Repaired the missing Xray freedom outbound; client traffic now has a direct route.")
+    if stats_updated:
+        print("Enabled Xray per-account online IP statistics through a loopback-only API.")
     print("Xray Core is installed and running. Create an account in each protocol menu to add its WS/gRPC inbounds.")
 
 
@@ -830,8 +1029,22 @@ def ensure_xray_default_outbound() -> bool:
     return True
 
 
+def configure_xray_online_stats() -> tuple[bool, bool]:
+    """Migrate an existing Xray installation to forwarding and per-user IP stats."""
+    if not XRAY_CONFIG.is_file() or not shutil.which("xray"):
+        return False, False
+    config = get_xray_config()
+    outbound_updated = _ensure_default_xray_outbound(config)
+    stats_updated = _ensure_xray_online_stats(config)
+    if not outbound_updated and not stats_updated:
+        return False, False
+    _write_xray(config)
+    return outbound_updated, stats_updated
+
+
 def _write_xray(cfg: dict) -> None:
     _ensure_default_xray_outbound(cfg)
+    _ensure_xray_online_stats(cfg)
     original = XRAY_CONFIG.read_text(encoding="utf-8") if XRAY_CONFIG.exists() else None
     _atomic(XRAY_CONFIG, json.dumps(cfg, indent=2) + "\n", 0o644)
     check = subprocess.run(["xray", "run", "-test", "-config", str(XRAY_CONFIG)], capture_output=True, text=True)
@@ -1377,13 +1590,13 @@ def account_menu(protocol: str) -> None:
             elif choice == "7":
                 purge_expired()
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
-                connections = active_connections("ssh") if protocol == "ssh" else None
+                connections = active_connections(protocol) if protocol in XRAY_PORTS or protocol == "ssh" else None
                 rows = account_roster_rows(protocol, names, connections=connections,
-                    connection_unknown=("Per-account device sessions are unavailable through the shared Xray gateway"
-                                         if protocol != "ssh" else ""))
+                    connection_unit="IP" if protocol in XRAY_PORTS else "SESSIONS")
                 import terminal_ui
                 terminal_ui.account_roster(f"{title} ACCOUNTS", rows,
-                    note="SSH rows count live TCP sessions; Xray user sessions are not exposed per account by the current gateway.")
+                    note=("Xray counts unique client IP addresses reported for each account; devices behind one NAT may share an IP."
+                          if protocol in XRAY_PORTS else "SSH rows count live authenticated TCP sessions; one device may open multiple sessions."))
             elif choice == "8":
                 purge_expired()
                 names = ssh_list() if protocol == "ssh" else xray_list(protocol)
@@ -1398,9 +1611,10 @@ def account_menu(protocol: str) -> None:
                         note="The count is concurrent authenticated TCP sessions, not physical devices; one device may open multiple sessions.")
                 else:
                     sessions = active_connections(protocol)
-                    rows = account_roster_rows(protocol, names, connection_unknown="Not attributable per account via shared gateway")
+                    rows = account_roster_rows(protocol, names, connections=sessions,
+                                               connection_unit="IP")
                     terminal_ui.account_roster(f"{title} LIVE CONNECTIONS", rows,
-                        note=f"Xray reports {sessions.get('active connections (not unique users)', 0)} shared inbound connections total; it cannot identify the account/device for each connection in this gateway layout.")
+                        note=f"Xray reports {sum(sessions.values())} active client IPs across these accounts; devices behind one NAT may share an IP.")
             else:
                 print("Invalid selection.")
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
