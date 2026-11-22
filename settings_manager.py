@@ -181,14 +181,24 @@ def speed_test() -> None:
         if not command:
             raise RuntimeError("speedtest-cli package installed but its command was not found")
     print("Running VPS speed test; this may take a minute...")
+    version = subprocess.run([command, "--version"], capture_output=True, text=True,
+                             check=False, timeout=10)
+    version_text = f"{version.stdout}\n{version.stderr}".casefold()
     args = [command]
-    if Path(command).name == "speedtest":
+    if "ookla" in version_text:
         args.extend(["--accept-license", "--accept-gdpr"])
+    else:
+        # Ubuntu's speedtest-cli package also installs a `speedtest` command.
+        # Detect the implementation instead of assuming that name means Ookla.
+        args.append("--simple")
     result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
+    output = (result.stdout or result.stderr).strip()
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or
+        raise RuntimeError((output or
                             f"Speed test exited with status {result.returncode}.").strip())
-    print(result.stdout or "Speed test completed without output.")
+    if not output:
+        raise RuntimeError("The speed test command returned no measurement output; check the installed CLI.")
+    print(output)
 
 
 def restart_or_reboot() -> None:

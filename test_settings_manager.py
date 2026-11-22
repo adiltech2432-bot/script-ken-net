@@ -198,17 +198,28 @@ class SettingsMenuTests(unittest.TestCase):
 
     def test_speed_test_runs_installed_cli_and_reports_failure(self):
         completed = CompletedProcess([], 0, "Download: 100 Mbps", "")
+        version = CompletedProcess([], 0, "speedtest-cli 2.1.3", "")
         with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
-             patch.object(settings_manager.subprocess, "run", return_value=completed) as run, \
+             patch.object(settings_manager.subprocess, "run", side_effect=[version, completed]) as run, \
              redirect_stdout(io.StringIO()):
             settings_manager.speed_test()
-        self.assertEqual(run.call_args.args[0], ["speedtest-cli"])
+        self.assertEqual(run.call_args_list[-1].args[0], ["speedtest-cli", "--simple"])
 
         failed = CompletedProcess([], 2, "", "measurement failed")
         with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
-             patch.object(settings_manager.subprocess, "run", return_value=failed), \
+             patch.object(settings_manager.subprocess, "run", side_effect=[version, failed]), \
              redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "measurement failed"):
             settings_manager.speed_test()
+
+    def test_speed_test_uses_ookla_acceptance_flags_only_for_ookla_cli(self):
+        version = CompletedProcess([], 0, "Speedtest by Ookla 1.2.0", "")
+        completed = CompletedProcess([], 0, "Download: 100 Mbps", "")
+        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest" if name == "speedtest" else None), \
+             patch.object(settings_manager.subprocess, "run", side_effect=[version, completed]) as run, \
+             redirect_stdout(io.StringIO()):
+            settings_manager.speed_test()
+        self.assertEqual(run.call_args_list[-1].args[0],
+                         ["speedtest", "--accept-license", "--accept-gdpr"])
 
     def test_power_menu_reboots_only_after_exact_confirmation_and_reports_invalid_choice(self):
         with patch.object(terminal_ui, "option_cards"), \
