@@ -38,6 +38,9 @@ class DashboardDataTests(unittest.TestCase):
 
     def test_brand_header_uses_requested_wine_background(self):
         self.assertEqual(dashboard_tui.RGB["fill_brand"], (136, 17, 68))
+        # Closest xterm-256 cell is RGB(135, 0, 95), rather than the much
+        # brighter cell picked by per-channel rounding.
+        self.assertEqual(dashboard_tui._xterm_index(dashboard_tui.RGB["fill_brand"]), 89)
 
     def test_server_geolocation_accepts_public_ip_facts_and_rejects_private_ips(self):
         facts = dashboard_tui._parse_server_geolocation({

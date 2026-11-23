@@ -141,12 +141,6 @@ class Row:
 
 def _xterm_index(rgb: tuple[int, int, int]) -> int:
     """Map an RGB palette color to the nearest xterm-256 cube or gray."""
-    def level(v: int) -> int:
-        return min(5, max(0, round(v / 255 * 5)))
-    r, g, b = (level(value) for value in rgb)
-    cube = (16 + 36 * r + 6 * g + b,)
-    grays = range(232, 256)
-    candidates = list(cube) + list(grays)
     def color(index: int) -> tuple[int, int, int]:
         if index >= 232:
             value = 8 + (index - 232) * 10
@@ -155,6 +149,9 @@ def _xterm_index(rgb: tuple[int, int, int]) -> int:
         return (0 if value // 36 == 0 else 55 + (value // 36) * 40,
                 0 if (value % 36) // 6 == 0 else 55 + ((value % 36) // 6) * 40,
                 0 if value % 6 == 0 else 55 + (value % 6) * 40)
+    # Search the full 6×6×6 cube as well as the grayscale ramp. Rounding each
+    # RGB channel independently can choose a visibly wrong cell near a boundary.
+    candidates = range(16, 256)
     return min(candidates, key=lambda index: sum((a - b) ** 2 for a, b in zip(color(index), rgb)))
 
 
