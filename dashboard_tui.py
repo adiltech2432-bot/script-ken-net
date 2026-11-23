@@ -85,11 +85,16 @@ RGB = {
     "fill_blue": (30, 48, 70), "fill_green": (28, 55, 49),
     "fill_selected": (41, 70, 100),
     "fill_banner": (231, 158, 48), "fill_header": (31, 48, 70),
-    "fill_brand": (15, 150, 156),
+    "fill_brand": (136, 17, 68),
 }
 CARD_FILLS = ("fill_blue", "fill_blue", "fill_blue", "fill_blue")
 SPARK = "▁▂▃▄▅▆▇█"
+DATA_REFRESH_INTERVAL = 2.0
+ACCOUNT_REFRESH_INTERVAL = 1.5
+LISTENER_CACHE_TTL = 3.0
 _activity = deque(maxlen=10)
+_listener_cache_lock = threading.Lock()
+_listener_cache: tuple[float, set[tuple[str, int]]] | None = None
 SERVER_GEO_CACHE_FILE = Path("/var/cache/kennet-panel/server-geolocation.json")
 SERVER_GEO_CACHE_TTL = 6 * 60 * 60
 _server_geo_lock = threading.Lock()
@@ -406,6 +411,37 @@ def _server_provider() -> str:
     return ""
 
 
+def _listener_snapshot() -> set[tuple[str, int]]:
+    """Read socket listeners once and share the short-lived result across protocols."""
+    global _listener_cache
+    with _listener_cache_lock:
+        now = time.monotonic()
+        if _listener_cache is not None and now - _listener_cache[0] < LISTENER_CACHE_TTL:
+            return set(_listener_cache[1])
+
+        listeners: set[tuple[str, int]] = set()
+        import re
+        try:
+            for transport, args in (("tcp", ["ss", "-H", "-lnt"]),
+                                    ("udp", ["ss", "-H", "-lnu"])):
+                result = subprocess.run(args, capture_output=True, text=True, timeout=2, check=False)
+                for line in result.stdout.splitlines():
+                    fields = line.split()
+                    if len(fields) < 2:
+                        continue
+                    # The local endpoint is immediately before the remote endpoint
+                    # in both standard `ss -H` output layouts.
+                    match = re.search(r":(\d+)$", fields[-2])
+                    if match:
+                        listeners.add((transport, int(match.group(1))))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            # Cache the empty result briefly too: a missing `ss` binary must not
+            # trigger another pair of slow subprocess calls for every protocol.
+            listeners = set()
+        _listener_cache = (now, listeners)
+        return set(listeners)
+
+
 def _configured_listeners(protocol: str) -> str:
     """Intersect the documented service catalog with the machine's live listeners."""
     try:
@@ -413,22 +449,7 @@ def _configured_listeners(protocol: str) -> str:
         services = {name: (transport, ports) for name, transport, ports, _note in service_catalog.SERVICES}
     except (ImportError, AttributeError, ValueError):
         return "—"
-    try:
-        listeners = set()
-        import re
-        for transport, args in (("tcp", ["ss", "-H", "-lnt"]), ("udp", ["ss", "-H", "-lnu"])):
-            result = subprocess.run(args, capture_output=True, text=True, timeout=2, check=False)
-            for line in result.stdout.splitlines():
-                fields = line.split()
-                if len(fields) < 2:
-                    continue
-                # The local endpoint is immediately before the remote endpoint
-                # in both standard `ss -H` output layouts.
-                match = re.search(r":(\d+)$", fields[-2])
-                if match:
-                    listeners.add((transport, int(match.group(1))))
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return "—"
+    listeners = _listener_snapshot()
     present = set()
     for name in CATALOG_SERVICES.get(protocol, ()):
         item = services.get(name)
@@ -534,8 +555,21 @@ class Dashboard:
         self.toast = ""
         self.toast_until = 0.0
         self.last_draw = None
-        self.rows: list[Row] = []
-        self.snapshot: dict[str, object] = {}
+        self.rows = [Row(key, PROTOCOL_META[key][0], group, color, "Loading", "Refreshing status…",
+                         "—", PROTOCOL_META[key][1], "—")
+                     for group, color, keys in GROUPS for key in keys]
+        self.snapshot: dict[str, object] = {
+            "domain": "—", "counts": {}, "online": {}, "server_info": {},
+            "load": None, "ram": None, "disk": None, "uptime": "—", "os": "—", "active": 0,
+        }
+        self._data_lock = threading.Lock()
+        self._data_refreshing = False
+        self._data_refreshed_at = 0.0
+        self._data_worker: threading.Thread | None = None
+        self._data_error = ""
+        self._account_lock = threading.Lock()
+        self._account_cache: dict[str, tuple[float, list[dict[str, object]]]] = {}
+        self._account_refreshing: set[str] = set()
         self.pairs: dict[str, int] = {}
         self._setup_terminal()
 
@@ -559,11 +593,14 @@ class Dashboard:
                         "fill_blue": curses.COLOR_BLACK, "fill_green": curses.COLOR_BLACK,
                         "fill_selected": curses.COLOR_BLUE,
                         "fill_banner": curses.COLOR_YELLOW, "fill_header": curses.COLOR_BLUE,
-                        "fill_brand": curses.COLOR_CYAN,
+                        "fill_brand": curses.COLOR_MAGENTA,
                     }.get(name, curses.COLOR_WHITE)
                     if idx < curses.COLOR_PAIRS:
                         if name.startswith("fill_"):
-                            foreground = (curses.COLOR_BLACK if name in {"fill_banner", "fill_brand"} else
+                            foreground = (_xterm_index((255, 255, 255))
+                                          if name == "fill_brand" and curses.COLORS >= 256 else
+                                          curses.COLOR_WHITE if name == "fill_brand" else
+                                          curses.COLOR_BLACK if name == "fill_banner" else
                                           _xterm_index(RGB["text"]) if curses.COLORS >= 256 else curses.COLOR_WHITE)
                             background = color
                         else:
@@ -580,6 +617,57 @@ class Dashboard:
         if reverse:
             style |= curses.A_REVERSE
         return style
+
+    def _schedule_data_refresh(self) -> None:
+        """Refresh server state away from curses so key handling never waits on probes."""
+        now = time.monotonic()
+        with self._data_lock:
+            if (self._data_refreshing or
+                    (self._data_refreshed_at > 0 and now - self._data_refreshed_at < DATA_REFRESH_INTERVAL)):
+                return
+            self._data_refreshing = True
+
+        def refresh() -> None:
+            try:
+                rows, snapshot = collect_rows()
+            except Exception as exc:
+                with self._data_lock:
+                    self._data_error = str(exc)
+                    self._data_refreshed_at = time.monotonic()
+                    self._data_refreshing = False
+                return
+            with self._data_lock:
+                self.rows = rows
+                self.snapshot = snapshot
+                self._data_error = ""
+                self._data_refreshed_at = time.monotonic()
+                self._data_refreshing = False
+
+        worker = threading.Thread(target=refresh, name="kennet-dashboard-state", daemon=True)
+        with self._data_lock:
+            self._data_worker = worker
+        worker.start()
+
+    def _cached_protocol_accounts(self, key: str) -> list[dict[str, object]]:
+        """Return the last account list immediately and refresh stale data in a worker."""
+        now = time.monotonic()
+        with self._account_lock:
+            cached = self._account_cache.get(key)
+            needs_refresh = cached is None or now - cached[0] >= ACCOUNT_REFRESH_INTERVAL
+            if needs_refresh and key not in self._account_refreshing:
+                self._account_refreshing.add(key)
+
+                def refresh_accounts() -> None:
+                    try:
+                        accounts = self._protocol_accounts(key) or []
+                    except Exception:
+                        accounts = []
+                    with self._account_lock:
+                        self._account_cache[key] = (time.monotonic(), accounts)
+                        self._account_refreshing.discard(key)
+
+                threading.Thread(target=refresh_accounts, name=f"kennet-accounts-{key}", daemon=True).start()
+            return list(cached[1]) if cached else []
 
     def put(self, y: int, x: int, text: object, color: str = "text", *, bold: bool = False,
             reverse: bool = False, width: int | None = None) -> None:
@@ -613,17 +701,18 @@ class Dashboard:
     def _header(self, width: int) -> None:
         title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         bar_x, bar_width = 1, width - 2
-        self.put(0, bar_x, " " * bar_width, "fill_brand", width=bar_width)
+        # Leave a terminal row above the brand card so it has clear breathing room.
+        self.put(1, bar_x, " " * bar_width, "fill_brand", width=bar_width)
         version = f"v{_release_version()}"
         version_x = max(2, width - len(version) - 3)
         title_x = max(2, (width - len(title)) // 2)
         if title_x + len(title) > version_x - 2:
             title_x = max(2, version_x - len(title) - 2)
         title_width = min(len(title), max(0, version_x - title_x - 2))
-        self.put(0, title_x, title, "fill_brand", bold=True, width=title_width)
-        self.put(0, version_x, version, "fill_brand", bold=True, width=len(version))
-        # Keep a full-height brand card while reserving its text for the title.
-        self.put(1, bar_x, " " * bar_width, "fill_brand", width=bar_width)
+        self.put(1, title_x, title, "fill_brand", bold=True, width=title_width)
+        self.put(1, version_x, version, "fill_brand", bold=True, width=len(version))
+        # Use a two-row card for a strong, centered title while preserving the version badge.
+        self.put(2, bar_x, " " * bar_width, "fill_brand", width=bar_width)
 
     def _server_details(self, y: int, width: int, summary_width: int = 62) -> None:
         """Show the requested host/account inventory without fabricated values."""
@@ -674,8 +763,8 @@ class Dashboard:
             else:
                 shown = "—" if value is None else f"{value}%"
                 color = "error" if int(value or 0) > 90 else "amber" if int(value or 0) > 70 else "mint"
-            self.put(2, x, label, "dim", bold=True)
-            self.put(2, x + len(label) + 1, shown, color, bold=True,
+            self.put(3, x, label, "dim", bold=True)
+            self.put(3, x + len(label) + 1, shown, color, bold=True,
                      width=max(8, gap - len(label) - 2))
 
     def _summary(self, y: int, width: int, *, detailed: bool = False,
@@ -963,7 +1052,7 @@ class Dashboard:
                          width=card_width - 2)
         body_top = 10
         body_bottom = height - 5
-        accounts = self._protocol_accounts(key) if self.protocol_tab == 0 or self.protocol_subview == "account" else []
+        accounts = self._cached_protocol_accounts(key) if self.protocol_tab == 0 or self.protocol_subview == "account" else []
         if self.protocol_subview == "account":
             self._draw_account_actions(row, width, body_top, body_bottom, accounts or [])
         elif self.protocol_tab == 0:
@@ -1460,10 +1549,13 @@ class Dashboard:
             self.put(0, 1, "Please enlarge the terminal (72x24 minimum)", "amber", bold=True)
             self.stdscr.refresh()
             return
-        try:
-            self.rows, self.snapshot = collect_rows()
-        except Exception as exc:
-            self.toast = f"State refresh failed: {exc}"
+        self._schedule_data_refresh()
+        with self._data_lock:
+            self.rows = list(self.rows)
+            self.snapshot = dict(self.snapshot)
+            refresh_error = self._data_error
+        if refresh_error:
+            self.toast = f"State refresh failed: {refresh_error}"
             self.toast_until = time.monotonic() + 4
         if self.protocol_view_key:
             self._draw_protocol_screen(width, height)
@@ -1634,7 +1726,7 @@ class Dashboard:
                     direction = -1 if key == curses.KEY_BTAB else 1
                     self.protocol_tab = (self.protocol_tab + direction) % 4
                 elif key in {curses.KEY_UP, "k"} and self.protocol_subview in {"accounts", "account"}:
-                    accounts = self._protocol_accounts(key_name) or []
+                    accounts = self._cached_protocol_accounts(key_name)
                     if accounts and self.protocol_subview == "accounts":
                         self.account_index = (self.account_index - 1) % len(accounts)
                     elif self.protocol_subview == "account":
@@ -1642,7 +1734,7 @@ class Dashboard:
                 elif key in {curses.KEY_UP, "k"} and self.protocol_subview == "service":
                     self.service_action_index = max(0, self.service_action_index - 2)
                 elif key in {curses.KEY_DOWN, "j"} and self.protocol_subview in {"accounts", "account"}:
-                    accounts = self._protocol_accounts(key_name) or []
+                    accounts = self._cached_protocol_accounts(key_name)
                     if accounts and self.protocol_subview == "accounts":
                         self.account_index = (self.account_index + 1) % len(accounts)
                     elif self.protocol_subview == "account":

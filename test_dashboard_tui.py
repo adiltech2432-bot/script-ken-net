@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +35,9 @@ class DashboardDataTests(unittest.TestCase):
         for rgb in dashboard_tui.RGB.values():
             self.assertGreaterEqual(dashboard_tui._xterm_index(rgb), 16)
             self.assertLessEqual(dashboard_tui._xterm_index(rgb), 255)
+
+    def test_brand_header_uses_requested_wine_background(self):
+        self.assertEqual(dashboard_tui.RGB["fill_brand"], (136, 17, 68))
 
     def test_server_geolocation_accepts_public_ip_facts_and_rejects_private_ips(self):
         facts = dashboard_tui._parse_server_geolocation({
@@ -151,12 +155,87 @@ class DashboardDataTests(unittest.TestCase):
             version = "v" + dashboard_tui._release_version()
             version_call = next(item for item in calls if item[2] == version)
             rendered = [item[2] for item in calls]
+            self.assertEqual(title_call[0], 1)
+            self.assertNotIn(0, [item[0] for item in calls])
+            self.assertIn((2, 1, " " * (width - 2), {"width": width - 2}), calls)
             self.assertEqual(title_call[0], version_call[0])
             self.assertTrue(title_call[3]["bold"])
             self.assertTrue(version_call[3]["bold"])
+            self.assertEqual(title_call[3]["width"], len(title))
             self.assertLess(title_call[1] + len(title), version_call[1])
             self.assertNotIn("◉ UBUNTU", rendered)
             self.assertNotIn("LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES", rendered)
+
+    def test_metric_line_sits_below_the_two_row_header(self):
+        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+        dashboard.snapshot = {"load": 0.25, "ram": 50, "disk": 10, "uptime": "up 1d 2h"}
+        calls = []
+        dashboard.put = lambda y, x, text, *args, **kwargs: calls.append((y, x, str(text)))
+
+        dashboard._metric_line(100)
+
+        self.assertEqual({item[0] for item in calls}, {3})
+
+    def test_dashboard_refresh_runs_off_the_render_thread(self):
+        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+        dashboard._data_lock = threading.Lock()
+        dashboard._data_refreshing = False
+        dashboard._data_refreshed_at = 0.0
+        dashboard._data_worker = None
+        dashboard._data_error = ""
+        previous = [dashboard_tui.Row("ssh", "SSH", "TUNNELS", "blue", "Loading",
+                                      "Loading", "—", "ssh", "—")]
+        refreshed = [dashboard_tui.Row("ssh", "SSH", "TUNNELS", "blue", "Active",
+                                       "active", "1 account", "ssh", "TCP/22")]
+        dashboard.rows = previous
+        dashboard.snapshot = {"load": None}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_collect():
+            entered.set()
+            release.wait(2)
+            return refreshed, {"load": 0.25}
+
+        with patch.object(dashboard_tui, "collect_rows", side_effect=slow_collect):
+            dashboard._schedule_data_refresh()
+            self.assertTrue(entered.wait(1))
+            self.assertIs(dashboard.rows[0], previous[0])
+            release.set()
+            dashboard._data_worker.join(timeout=2)
+
+        self.assertFalse(dashboard._data_worker.is_alive())
+        self.assertEqual(dashboard.rows[0].state, "Active")
+        self.assertEqual(dashboard.snapshot["load"], 0.25)
+
+    def test_account_navigation_uses_cached_rows_while_refreshing(self):
+        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+        dashboard._account_lock = threading.Lock()
+        dashboard._account_cache = {}
+        dashboard._account_refreshing = set()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_accounts(_key):
+            entered.set()
+            release.wait(2)
+            return [{"name": "alice"}]
+
+        dashboard._protocol_accounts = slow_accounts
+        with patch.object(dashboard_tui, "threading") as threading_module:
+            # Use real worker threads while recording no timing assumptions.
+            threading_module.Thread.side_effect = threading.Thread
+            accounts = dashboard._cached_protocol_accounts("ssh")
+            self.assertEqual(accounts, [])
+        self.assertTrue(entered.wait(1))
+        release.set()
+        # The worker is daemonized and the completed value is observed next draw.
+        for _ in range(100):
+            accounts = dashboard._cached_protocol_accounts("ssh")
+            if accounts:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(accounts, [{"name": "alice"}])
 
     @patch("subprocess.run")
     def test_listener_display_checks_all_catalog_ports(self, run):
@@ -167,18 +246,22 @@ class DashboardDataTests(unittest.TestCase):
                 "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*\n", ""),
             subprocess.CompletedProcess([], 0, "", ""),
         ]
-        self.assertEqual(dashboard_tui._configured_listeners("ssh"), "TCP/22, TCP/80, TCP/443")
+        with patch.object(dashboard_tui, "_listener_cache", None):
+            self.assertEqual(dashboard_tui._configured_listeners("ssh"), "TCP/22, TCP/80, TCP/443")
+            self.assertEqual(dashboard_tui._configured_listeners("vmess"), "TCP/80, TCP/443")
         self.assertEqual(run.call_count, 2)
 
     @patch("subprocess.run")
     def test_listener_display_uses_dash_if_catalog_ports_are_absent(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, "", "")
-        self.assertEqual(dashboard_tui._configured_listeners("vmess"), "—")
+        with patch.object(dashboard_tui, "_listener_cache", None):
+            self.assertEqual(dashboard_tui._configured_listeners("vmess"), "—")
 
     @patch("subprocess.run")
     def test_listener_probe_failure_is_not_reported_as_a_port(self, run):
         run.side_effect = FileNotFoundError("ss")
-        self.assertEqual(dashboard_tui._configured_listeners("ssh"), "—")
+        with patch.object(dashboard_tui, "_listener_cache", None):
+            self.assertEqual(dashboard_tui._configured_listeners("ssh"), "—")
 
 
 if __name__ == "__main__":
