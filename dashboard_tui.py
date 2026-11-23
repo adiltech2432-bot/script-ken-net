@@ -696,6 +696,14 @@ class Dashboard:
         self.put(y + height - 1, x, bl + h * (width - 2) + br, color)
 
     def _header(self, width: int) -> None:
+        # SSH clients can deliver a resize just after curses starts; use the
+        # current screen width instead of a stale size captured earlier in draw().
+        try:
+            current_width = self.stdscr.getmaxyx()[1]
+        except (AttributeError, IndexError, TypeError):
+            pass
+        else:
+            width = min(width, current_width)
         title = "KEN-NET  •  SERVER MANAGEMENT PANEL"
         bar_x, bar_width = 1, width - 2
         # Leave a terminal row above the brand card so it has clear breathing room.

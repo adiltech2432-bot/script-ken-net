@@ -169,6 +169,20 @@ class DashboardDataTests(unittest.TestCase):
             self.assertNotIn("◉ UBUNTU", rendered)
             self.assertNotIn("LIVE SERVER CONTROL  •  HOST STATUS & NETWORK SERVICES", rendered)
 
+    def test_header_recalculates_when_terminal_resizes_during_startup(self):
+        dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
+        dashboard.ascii = False
+        dashboard.stdscr = type("Screen", (), {"getmaxyx": lambda _self: (30, 80)})()
+        calls = []
+        dashboard.put = lambda y, x, text, *args, **kwargs: calls.append((y, x, str(text), kwargs))
+
+        dashboard._header(100)
+
+        title = next(item for item in calls if item[2] == "KEN-NET  •  SERVER MANAGEMENT PANEL")
+        version = next(item for item in calls if item[2] == "v" + dashboard_tui._release_version())
+        self.assertEqual(version[1], 80 - len(version[2]) - 3)
+        self.assertLess(title[1] + len(title[2]), version[1])
+
     def test_metric_line_sits_below_the_two_row_header(self):
         dashboard = dashboard_tui.Dashboard.__new__(dashboard_tui.Dashboard)
         dashboard.snapshot = {"load": 0.25, "ram": 50, "disk": 10, "uptime": "up 1d 2h"}
