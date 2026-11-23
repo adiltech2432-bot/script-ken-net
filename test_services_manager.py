@@ -165,7 +165,7 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         expire_user.assert_not_called()
         self.assertIn("permanent", data["accounts"])
 
-    def test_expiry_timer_checks_accounts_every_15_seconds(self):
+    def test_expiry_timer_checks_accounts_every_five_seconds(self):
         captured = {}
 
         def remember(path, contents, mode=0o600):
@@ -177,6 +177,45 @@ root 122 /usr/sbin/sshd -D [listener] 0 of 10-100 startups
         timer = next(text for path, text in captured.items() if path.endswith("kennet-account-expiry.timer"))
         self.assertIn("OnBootSec=5s", timer)
         self.assertIn("OnUnitActiveSec=5s", timer)
+
+    def test_strict_expiry_cleanup_reports_protocol_manager_failures(self):
+        data = {"accounts": {}}
+        with patch.object(services, "state", return_value=data), \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", side_effect=RuntimeError("wireguard cleanup failed")), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]) as dnstt_purge, \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]) as openvpn_purge, \
+             self.assertRaisesRegex(RuntimeError, "wireguard cleanup failed"):
+            services.purge_expired(strict=True)
+        dnstt_purge.assert_called_once()
+        openvpn_purge.assert_called_once()
+
+    def test_strict_cleanup_continues_other_protocols_when_xray_config_cannot_be_updated(self):
+        data = {"accounts": {
+            "alice": {"protocol": "ssh", "expires_at": "2020-01-01"},
+            "xray-user": {"protocol": "vless", "expires_at": "2020-01-01"},
+        }}
+        with patch.object(services, "state", return_value=data), \
+             patch.object(services, "expiry_reached", return_value=True), \
+             patch.object(services, "_expire_linux_user") as expire_user, \
+             patch.object(services, "get_xray_config", side_effect=RuntimeError("invalid Xray config")), \
+             patch.object(services, "_archive_expired") as archive, \
+             patch.object(services, "_atomic"), \
+             patch("wireguard_manager.list_peers", return_value={}), \
+             patch("wireguard_manager.purge_expired", return_value=[]), \
+             patch("dnstt_manager.list_accounts", return_value={}), \
+             patch("dnstt_manager.purge_expired", return_value=[]), \
+             patch("openvpn_manager._account_state", return_value={"accounts": {}}), \
+             patch("openvpn_manager.purge_expired", return_value=[]), \
+             self.assertRaisesRegex(RuntimeError, "invalid Xray config"):
+            services.purge_expired(strict=True)
+
+        expire_user.assert_called_once_with("alice")
+        archive.assert_called_once_with("ssh", "alice", {"protocol": "ssh", "expires_at": "2020-01-01"})
+        self.assertNotIn("alice", data["accounts"])
+        self.assertIn("xray-user", data["accounts"])
 
     def test_expired_linux_login_is_locked_and_sessions_are_terminated_before_deletion(self):
         calls = []

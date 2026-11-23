@@ -23,18 +23,39 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_RESPONSE_CONFIG = Path("/etc/kennet-panel/websocket-response.json")
 DEFAULT_RESPONSE_BANNER = "KEN-NET"
 RESPONSE_BANNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$")
+LOG_COLOR_CODES = {
+    "green": "\033[92m", "cyan": "\033[96m", "yellow": "\033[93m",
+    "blue": "\033[94m", "magenta": "\033[95m", "white": "\033[97m",
+}
+LOG_RESET = "\033[0m"
+
+
+def _response_settings() -> dict[str, str]:
+    try:
+        config = json.loads(WS_RESPONSE_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        config = {}
+    return config if isinstance(config, dict) else {}
 
 
 def response_banner() -> str:
     """Read a safe optional response banner; invalid config falls back harmlessly."""
-    try:
-        config = json.loads(WS_RESPONSE_CONFIG.read_text(encoding="utf-8"))
-        value = config.get("banner", DEFAULT_RESPONSE_BANNER) if isinstance(config, dict) else ""
-        if isinstance(value, str) and RESPONSE_BANNER_RE.fullmatch(value.strip()):
-            return value.strip()
-    except (OSError, ValueError, TypeError):
-        pass
+    value = _response_settings().get("banner", DEFAULT_RESPONSE_BANNER)
+    if isinstance(value, str) and RESPONSE_BANNER_RE.fullmatch(value.strip()):
+        return value.strip()
     return DEFAULT_RESPONSE_BANNER
+
+
+def response_log_color() -> str:
+    """Read a fixed allow-listed terminal color for successful handshake log entries."""
+    value = _response_settings().get("log_color", "green")
+    return value if isinstance(value, str) and value in LOG_COLOR_CODES else "green"
+
+
+def log_successful_handshake() -> None:
+    """Write a colored success line to journald without adding control codes to HTTP."""
+    color = LOG_COLOR_CODES[response_log_color()]
+    print(f"{color}[KEN-NET] WebSocket 101 | {response_banner()}{LOG_RESET}", flush=True)
 
 
 def switching_protocols_response(accept: str | None = None) -> bytes:
@@ -155,6 +176,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 asyncio.open_connection("127.0.0.1", LEGACY_ACL_BACKEND_PORT), timeout=5)
             writer.write(switching_protocols_response())
             await writer.drain()
+            log_successful_handshake()
             await _relay_raw(reader, writer, backend_reader, backend)
             return
 
@@ -185,6 +207,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         accept = base64.b64encode(hashlib.sha1((key + GUID).encode("ascii")).digest()).decode("ascii")
         writer.write(switching_protocols_response(accept))
         await writer.drain()
+        log_successful_handshake()
         async def tcp_to_ws() -> None:
             while data := await backend_reader.read(65536):
                 await _write_frame(writer, data)

@@ -32,6 +32,8 @@ class SettingsMenuTests(unittest.TestCase):
             "settings_manager.speed_test": "8",
             "settings_manager.change_ws_response": "9",
             "settings_manager.restart_or_reboot": "10",
+            "settings_manager.daily_auto_reboot": "11",
+            "settings_manager.delete_expired_accounts": "12",
         }
         mockers = {}
         choices = [value for number in action_paths.values() for value in (number, "")] + ["0"]
@@ -46,7 +48,7 @@ class SettingsMenuTests(unittest.TestCase):
 
         for action in mockers.values():
             action.assert_called_once()
-        self.assertEqual(cards.call_count, 11)
+        self.assertEqual(cards.call_count, 13)
         first_options = cards.call_args_list[0].args[1]
         self.assertTrue(cards.call_args_list[0].kwargs["colorful"])
         self.assertIn(("9", "≋  WebSocket response banner"), first_options)
@@ -201,9 +203,10 @@ class SettingsMenuTests(unittest.TestCase):
         version = CompletedProcess([], 0, "speedtest-cli 2.1.3", "")
         with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
              patch.object(settings_manager.subprocess, "run", side_effect=[version, completed]) as run, \
-             redirect_stdout(io.StringIO()):
+             redirect_stdout(io.StringIO()) as output:
             settings_manager.speed_test()
         self.assertEqual(run.call_args_list[-1].args[0], ["speedtest-cli", "--simple"])
+        self.assertIn("Measurement source: speedtest-cli", output.getvalue())
 
         failed = CompletedProcess([], 2, "", "measurement failed")
         with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
@@ -220,6 +223,71 @@ class SettingsMenuTests(unittest.TestCase):
             settings_manager.speed_test()
         self.assertEqual(run.call_args_list[-1].args[0],
                          ["speedtest", "--accept-license", "--accept-gdpr"])
+
+    def test_speed_test_refuses_to_report_when_cli_version_cannot_be_verified(self):
+        version = CompletedProcess([], 1, "", "version probe failed")
+        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
+             patch.object(settings_manager.subprocess, "run", return_value=version), \
+             self.assertRaisesRegex(RuntimeError, "version probe failed"):
+            settings_manager.speed_test()
+
+    def test_daily_auto_reboot_writes_local_time_timer_and_enables_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = Path(temp_dir) / "kennet-auto-reboot.service"
+            timer = Path(temp_dir) / "kennet-auto-reboot.timer"
+            calls = []
+            with patch.object(settings_manager, "AUTO_REBOOT_SERVICE", service), \
+                 patch.object(settings_manager, "AUTO_REBOOT_TIMER", timer), \
+                 patch.object(settings_manager, "_run", side_effect=lambda args: calls.append(args) or ""), \
+                 patch.object(settings_manager, "_server_timezone", return_value="Africa/Casablanca"), \
+                 patch("builtins.input", side_effect=["1", "03:27"]), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch.object(terminal_ui, "option_cards"):
+                settings_manager.daily_auto_reboot()
+
+            self.assertIn("ExecStart=/usr/bin/systemctl reboot", service.read_text(encoding="utf-8"))
+            contents = timer.read_text(encoding="utf-8")
+            self.assertIn("OnCalendar=*-*-* 03:27:00 Africa/Casablanca", contents)
+            self.assertIn("AccuracySec=1s", contents)
+            self.assertIn("Persistent=false", contents)
+            self.assertEqual(calls, [["systemctl", "daemon-reload"],
+                                     ["systemctl", "enable", "--now", "kennet-auto-reboot.timer"]])
+
+    def test_daily_auto_reboot_rejects_invalid_clock_time_without_installing(self):
+        with patch("builtins.input", side_effect=["1", "25:90"]), \
+             patch.object(settings_manager, "_run") as run, \
+             patch.object(terminal_ui, "detail_card"), \
+             patch.object(terminal_ui, "option_cards"), \
+             self.assertRaisesRegex(ValueError, "HH:MM"):
+            settings_manager.daily_auto_reboot()
+        run.assert_not_called()
+
+    def test_daily_auto_reboot_disable_removes_timer_and_disables_schedule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = Path(temp_dir) / "kennet-auto-reboot.service"
+            timer = Path(temp_dir) / "kennet-auto-reboot.timer"
+            service.write_text("service", encoding="utf-8")
+            timer.write_text("timer", encoding="utf-8")
+            calls = []
+            with patch.object(settings_manager, "AUTO_REBOOT_SERVICE", service), \
+                 patch.object(settings_manager, "AUTO_REBOOT_TIMER", timer), \
+                 patch.object(settings_manager, "_run", side_effect=lambda args: calls.append(args) or ""), \
+                 patch.object(settings_manager.subprocess, "run", return_value=CompletedProcess([], 0, "", "")), \
+                 patch("builtins.input", side_effect=["2", "DISABLE"]), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch.object(terminal_ui, "option_cards"):
+                settings_manager.daily_auto_reboot()
+            self.assertFalse(service.exists())
+            self.assertFalse(timer.exists())
+            self.assertEqual(calls, [["systemctl", "daemon-reload"]])
+
+    def test_delete_expired_accounts_reports_protocol_names_removed(self):
+        with patch("services_manager.purge_expired", return_value=["alice", "trojan:bob"]) as purge, \
+             redirect_stdout(io.StringIO()) as output:
+            settings_manager.delete_expired_accounts()
+        purge.assert_called_once_with(strict=True)
+        self.assertIn("Expired accounts removed: 2", output.getvalue())
+        self.assertIn("alice, trojan:bob", output.getvalue())
 
     def test_power_menu_reboots_only_after_exact_confirmation_and_reports_invalid_choice(self):
         with patch.object(terminal_ui, "option_cards"), \
@@ -241,10 +309,11 @@ class SettingsMenuTests(unittest.TestCase):
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
                  patch.object(terminal_ui, "detail_card"), \
-                 patch("builtins.input", return_value="KEN-NET Gateway 2"):
+                 patch.object(terminal_ui, "option_cards"), \
+                 patch("builtins.input", side_effect=["KEN-NET Gateway 2", "2"]):
                 settings_manager.change_ws_response()
                 self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
-                                 {"banner": "KEN-NET Gateway 2"})
+                                 {"banner": "KEN-NET Gateway 2", "log_color": "cyan"})
                 response = websocket_tunnel.switching_protocols_response("accept-token")
                 self.assertIn(b"HTTP/1.1 101 Switching Protocols", response)
                 self.assertIn(b"X-KEN-NET-Banner: KEN-NET Gateway 2", response)
@@ -256,18 +325,19 @@ class SettingsMenuTests(unittest.TestCase):
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
                  patch.object(terminal_ui, "detail_card"), \
-                 patch("builtins.input", return_value="BY\u00a0KEN\u2011NET"):
+                 patch.object(terminal_ui, "option_cards"), \
+                 patch("builtins.input", side_effect=["BY\u00a0KEN\u2011NET", ""]):
                 settings_manager.change_ws_response()
 
             self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
-                             {"banner": "BY KEN-NET"})
+                             {"banner": "BY KEN-NET", "log_color": "green"})
 
     def test_websocket_response_rejects_header_injection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "websocket-response.json"
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(terminal_ui, "detail_card"), \
-                 patch("builtins.input", return_value="KEN-NET\r\nUpgrade: no"), \
+                 patch("builtins.input", side_effect=["KEN-NET\r\nUpgrade: no", "2"]), \
                  self.assertRaisesRegex(ValueError, "1–64 letters"):
                 settings_manager.change_ws_response()
             self.assertFalse(config.exists())
@@ -277,7 +347,7 @@ class SettingsMenuTests(unittest.TestCase):
             config = Path(temp_dir) / "websocket-response.json"
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(terminal_ui, "detail_card"), \
-                 patch("builtins.input", return_value="BY\u200b KEN-NET"), \
+                 patch("builtins.input", side_effect=["BY\u200b KEN-NET", "2"]), \
                  self.assertRaisesRegex(ValueError, "U\\+200B"):
                 settings_manager.change_ws_response()
             self.assertFalse(config.exists())
@@ -288,6 +358,20 @@ class SettingsMenuTests(unittest.TestCase):
             config.write_text('{"banner":"safe\r\nX-Injected: yes"}', encoding="utf-8")
             with patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config):
                 self.assertEqual(websocket_tunnel.response_banner(), "KEN-NET")
+
+    def test_websocket_success_log_uses_configured_color_without_coloring_http_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            config.write_text(json.dumps({"banner": "BY KEN-NET", "log_color": "magenta"}),
+                              encoding="utf-8")
+            with patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 redirect_stdout(io.StringIO()) as output:
+                websocket_tunnel.log_successful_handshake()
+                response = websocket_tunnel.switching_protocols_response("accept-token")
+            self.assertIn("\033[95m", output.getvalue())
+            self.assertIn("\033[0m", output.getvalue())
+            self.assertIn(b"X-KEN-NET-Banner: BY KEN-NET", response)
+            self.assertNotIn(b"\x1b[95m", response)
 
 
 if __name__ == "__main__":

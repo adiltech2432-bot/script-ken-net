@@ -614,10 +614,11 @@ WantedBy=timers.target
     _run(["systemctl", "restart", "kennet-account-expiry.timer"])
 
 
-def purge_expired(today: dt.date | None = None) -> list[str]:
+def purge_expired(today: dt.date | None = None, *, strict: bool = False) -> list[str]:
     today = today or dt.date.today()
     data = state()
     expired = []
+    cleanup_errors: list[str] = []
     xray_expired = []
     for username, record in list(data.get("accounts", {}).items()):
         value = record.get("expires_at")
@@ -643,25 +644,40 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         if not is_expired:
             continue
         if record.get("protocol") in {"ssh", "udp"}:
-            _expire_linux_user(username)
+            try:
+                _expire_linux_user(username)
+            except Exception as exc:
+                if not strict:
+                    raise
+                cleanup_errors.append(f"{record.get('protocol', 'SSH').upper()} {username}: {exc}")
+                continue
         elif record.get("protocol") in XRAY_PORTS:
             xray_expired.append((username, record["protocol"]))
         else:
             continue
         expired.append(username)
     if xray_expired:
-        cfg = get_xray_config()
-        expired_by_protocol: dict[str, set[str]] = {}
-        for username, protocol in xray_expired:
-            expired_by_protocol.setdefault(protocol, set()).add(username)
-        for item in cfg.get("inbounds", []):
-            tag = item.get("tag", "")
-            for protocol, usernames in expired_by_protocol.items():
-                if tag in _managed_tags(protocol):
-                    item.setdefault("settings", {})["clients"] = [
-                        client for client in item.get("settings", {}).get("clients", [])
-                        if client.get("email") not in usernames]
-        _write_xray(cfg)
+        xray_names = {username for username, _protocol in xray_expired}
+        try:
+            cfg = get_xray_config()
+            expired_by_protocol: dict[str, set[str]] = {}
+            for username, protocol in xray_expired:
+                expired_by_protocol.setdefault(protocol, set()).add(username)
+            for item in cfg.get("inbounds", []):
+                tag = item.get("tag", "")
+                for protocol, usernames in expired_by_protocol.items():
+                    if tag in _managed_tags(protocol):
+                        item.setdefault("settings", {})["clients"] = [
+                            client for client in item.get("settings", {}).get("clients", [])
+                            if client.get("email") not in usernames]
+            _write_xray(cfg)
+        except Exception as exc:
+            if not strict:
+                raise
+            cleanup_errors.append(f"Xray: {exc}")
+            # Do not archive/remove Xray records if the active config could not
+            # be updated; preserve them so a later cleanup can retry safely.
+            expired = [username for username in expired if username not in xray_names]
     for username in expired:
         record = dict(data["accounts"].get(username, {}))
         _archive_expired(record.get("protocol", "unknown"), username, record)
@@ -675,8 +691,11 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         for name in removed:
             _archive_expired("wireguard", name, peers.get(name, {}))
         expired.extend("wireguard:" + name for name in removed)
-    except (ImportError, FileNotFoundError, RuntimeError, ValueError):
-        pass
+    except Exception as exc:
+        if strict:
+            cleanup_errors.append(f"WireGuard: {exc}")
+        elif not isinstance(exc, (ImportError, FileNotFoundError, RuntimeError, ValueError)):
+            raise
     try:
         import dnstt_manager
         accounts = dnstt_manager.list_accounts()
@@ -684,8 +703,11 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         for name in removed:
             _archive_expired("dnstt", name, accounts.get(name, {}))
         expired.extend("dnstt:" + name for name in removed)
-    except (ImportError, FileNotFoundError, RuntimeError, ValueError):
-        pass
+    except Exception as exc:
+        if strict:
+            cleanup_errors.append(f"DNSTT: {exc}")
+        elif not isinstance(exc, (ImportError, FileNotFoundError, RuntimeError, ValueError)):
+            raise
     try:
         import openvpn_manager
         accounts = openvpn_manager._account_state().get("accounts", {})
@@ -693,8 +715,15 @@ def purge_expired(today: dt.date | None = None) -> list[str]:
         for name in removed:
             _archive_expired("openvpn", name, accounts.get(name, {}))
         expired.extend("openvpn:" + name for name in removed)
-    except (ImportError, FileNotFoundError, RuntimeError, ValueError):
-        pass
+    except Exception as exc:
+        if strict:
+            cleanup_errors.append(f"OpenVPN: {exc}")
+        elif not isinstance(exc, (ImportError, FileNotFoundError, RuntimeError, ValueError)):
+            raise
+    if cleanup_errors:
+        removed_summary = ", ".join(expired) if expired else "none"
+        raise RuntimeError("Expired-account cleanup incomplete for " + "; ".join(cleanup_errors) +
+                           f". Accounts removed successfully: {removed_summary}")
     return expired
 
 

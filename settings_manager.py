@@ -26,6 +26,13 @@ SSH_BANNER_CONFIG = Path("/etc/ssh/sshd_config.d/99-kennet-banner.conf")
 WS_RESPONSE_CONFIG = Path("/etc/kennet-panel/websocket-response.json")
 DEFAULT_WS_RESPONSE_BANNER = "KEN-NET"
 WS_RESPONSE_BANNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$")
+WS_LOG_COLORS = {
+    "1": ("green", "\033[92m"), "2": ("cyan", "\033[96m"),
+    "3": ("yellow", "\033[93m"), "4": ("blue", "\033[94m"),
+    "5": ("magenta", "\033[95m"), "6": ("white", "\033[97m"),
+}
+AUTO_REBOOT_SERVICE = Path("/etc/systemd/system/kennet-auto-reboot.service")
+AUTO_REBOOT_TIMER = Path("/etc/systemd/system/kennet-auto-reboot.timer")
 
 
 def _run(args: list[str]) -> str:
@@ -33,6 +40,21 @@ def _run(args: list[str]) -> str:
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "Command failed").strip())
     return result.stdout.strip()
+
+
+def _atomic_text(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def restart_services() -> None:
@@ -185,6 +207,10 @@ def speed_test() -> None:
     version = subprocess.run([command, "--version"], capture_output=True, text=True,
                              check=False, timeout=10)
     version_text = f"{version.stdout}\n{version.stderr}".casefold()
+    version_label = (version.stdout or version.stderr).strip().splitlines()
+    if version.returncode or not version_label:
+        raise RuntimeError(((version.stderr or version.stdout or
+                             "Could not verify the installed speed-test CLI version.")).strip())
     args = [command]
     if "ookla" in version_text:
         args.extend(["--accept-license", "--accept-gdpr"])
@@ -199,6 +225,8 @@ def speed_test() -> None:
                             f"Speed test exited with status {result.returncode}.").strip())
     if not output:
         raise RuntimeError("The speed test command returned no measurement output; check the installed CLI.")
+    print(f"Measurement source: {Path(command).name} ({version_label[0]})")
+    print("Measured VPS network results:")
     print(output)
 
 
@@ -219,20 +247,21 @@ def restart_or_reboot() -> None:
 def change_ws_response() -> None:
     import websocket_tunnel
     current = websocket_tunnel.response_banner()
+    current_color = websocket_tunnel.response_log_color()
     terminal_ui.detail_card("WEBSOCKET RESPONSE BANNER", [
         ("Required handshake", "101 Switching Protocols"),
         ("Current KEN-NET banner", current),
-    ], note="The 101 status is required by WebSocket clients. This setting changes only the optional X-KEN-NET-Banner header and applies to new handshakes without restarting the bridge.", color=terminal_ui.BLUE)
+        ("Handshake log color", current_color.upper()),
+    ], note="The HTTP header stays plain ASCII. The selected color applies to successful WebSocket 101 entries in the systemd service log and takes effect immediately.", color=terminal_ui.BLUE)
     value = input("New response banner [Enter keeps current; DEFAULT resets]: ")
     value = unicodedata.normalize("NFKC", value)
     value = "".join("-" if unicodedata.category(char) == "Pd" or char == "\u2212" else char
                     for char in value).strip()
     if not value:
-        print("No change made.")
-        return
+        value = current
     if value.upper() == "DEFAULT":
         value = DEFAULT_WS_RESPONSE_BANNER
-    if not WS_RESPONSE_BANNER_RE.fullmatch(value):
+    if value != current and not WS_RESPONSE_BANNER_RE.fullmatch(value):
         allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ._/-")
         invalid = list(dict.fromkeys(
             f"U+{ord(char):04X}" for index, char in enumerate(value)
@@ -240,21 +269,112 @@ def change_ws_response() -> None:
         ))
         detail = f" Unsupported character code(s): {', '.join(invalid)}." if invalid else ""
         raise ValueError("Use 1–64 letters, numbers, spaces, dots, underscores, slashes, or hyphens." + detail)
+    choices = [(key, f"{name.title()} log") for key, (name, _ansi) in WS_LOG_COLORS.items()]
+    terminal_ui.option_cards("WEBSOCKET HANDSHAKE LOG COLOR", choices, columns=3,
+                             color=terminal_ui.BLUE, colorful=True)
+    selected = input(f"Log color [1-6; Enter keeps {current_color}]: ").strip()
+    if not selected:
+        color_name = current_color
+    else:
+        by_name = {name: name for name, _ansi in WS_LOG_COLORS.values()}
+        if selected in WS_LOG_COLORS:
+            color_name = WS_LOG_COLORS[selected][0]
+        elif selected.casefold() in by_name:
+            color_name = selected.casefold()
+        else:
+            raise ValueError("Choose a WebSocket log color from 1 to 6, or press Enter to keep the current color.")
+    if value == current and color_name == current_color:
+        print("No change made.")
+        return
+    _atomic_text(WS_RESPONSE_CONFIG, json.dumps({"banner": value, "log_color": color_name}) + "\n")
+    ansi = next(code for name, code in WS_LOG_COLORS.values() if name == color_name)
+    print(f"{ansi}WebSocket handshake log preview: {value}\033[0m")
+    print("The response header remains plain ASCII; the log color applies to new successful handshakes immediately.")
 
-    WS_RESPONSE_CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-    fd, temporary = tempfile.mkstemp(prefix=".websocket-response.", dir=str(WS_RESPONSE_CONFIG.parent))
+
+def _server_timezone() -> str:
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"banner": value}, handle)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, WS_RESPONSE_CONFIG)
-    except Exception:
-        Path(temporary).unlink(missing_ok=True)
-        raise
-    print(f"WebSocket response banner saved: {value}. It applies to new connections immediately.")
+        result = subprocess.run(["timedatectl", "show", "-p", "Timezone", "--value"],
+                                capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return "Etc/UTC"
+    zone = result.stdout.strip()
+    if result.returncode or not zone or not re.fullmatch(r"[A-Za-z0-9_+./-]+", zone):
+        return "Etc/UTC"
+    return zone
+
+
+def daily_auto_reboot() -> None:
+    zone = _server_timezone()
+    current = "Not scheduled"
+    if AUTO_REBOOT_TIMER.is_file():
+        match = re.search(r"(?m)^OnCalendar=\*-\*-\* (\d{2}:\d{2}:\d{2})(?: ([^\s]+))?$",
+                          AUTO_REBOOT_TIMER.read_text(encoding="utf-8"))
+        if match:
+            current = f"Daily at {match.group(1)[:5]} {match.group(2) or zone}"
+    terminal_ui.detail_card("DAILY VPS AUTO REBOOT", [
+        ("Current schedule", current), ("Server timezone", zone),
+    ], note="The schedule uses the selected server timezone and is armed daily with 1-second systemd timer accuracy.", color=terminal_ui.YELLOW)
+    terminal_ui.option_cards("DAILY VPS AUTO REBOOT", [
+        ("1", "Set / change daily time"), ("2", "Disable schedule"), ("0", "Return"),
+    ], columns=2, color=terminal_ui.YELLOW)
+    choice = input("Select: ").strip()
+    if choice == "0":
+        return
+    if choice == "1":
+        scheduled = input(f"Daily reboot time HH:MM [{zone}]: ").strip()
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", scheduled):
+            raise ValueError("Enter a 24-hour time in HH:MM format, for example 03:30.")
+        service = """[Unit]
+Description=Daily scheduled KEN-NET VPS reboot
+DefaultDependencies=yes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot
+"""
+        timer = ("[Unit]\nDescription=Daily KEN-NET VPS reboot schedule\n\n"
+                 "[Timer]\n"
+                 f"OnCalendar=*-*-* {scheduled}:00 {zone}\n"
+                 "AccuracySec=1s\nRandomizedDelaySec=0\nPersistent=false\n"
+                 "Unit=kennet-auto-reboot.service\n\n"
+                 "[Install]\nWantedBy=timers.target\n")
+        _atomic_text(AUTO_REBOOT_SERVICE, service)
+        _atomic_text(AUTO_REBOOT_TIMER, timer)
+        try:
+            _run(["systemctl", "daemon-reload"])
+            _run(["systemctl", "enable", "--now", "kennet-auto-reboot.timer"])
+        except Exception:
+            AUTO_REBOOT_SERVICE.unlink(missing_ok=True)
+            AUTO_REBOOT_TIMER.unlink(missing_ok=True)
+            subprocess.run(["systemctl", "disable", "--now", "kennet-auto-reboot.timer"],
+                           capture_output=True, check=False)
+            subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+            raise
+        print(f"Daily VPS reboot scheduled for {scheduled} ({zone}).")
+    elif choice == "2":
+        if input("This removes the daily reboot schedule. Type DISABLE: ").strip() != "DISABLE":
+            print("Cancelled.")
+            return
+        if AUTO_REBOOT_TIMER.exists() or AUTO_REBOOT_SERVICE.exists():
+            result = subprocess.run(["systemctl", "disable", "--now", "kennet-auto-reboot.timer"],
+                                    capture_output=True, text=True, check=False)
+            if result.returncode:
+                raise RuntimeError((result.stderr or result.stdout or
+                                    "Could not disable the daily reboot timer.").strip())
+        AUTO_REBOOT_TIMER.unlink(missing_ok=True)
+        AUTO_REBOOT_SERVICE.unlink(missing_ok=True)
+        _run(["systemctl", "daemon-reload"])
+        print("Daily VPS auto reboot disabled.")
+    else:
+        print("Invalid selection. Choose 1, 2, or 0.")
+
+
+def delete_expired_accounts() -> None:
+    import services_manager
+    removed = services_manager.purge_expired(strict=True)
+    print(f"Expired accounts removed: {len(removed)}")
+    print(", ".join(removed) if removed else "No expired accounts found.")
 
 
 def menu() -> None:
@@ -272,6 +392,8 @@ def menu() -> None:
         "8": ("↗  VPS network speed test", speed_test),
         "9": ("≋  WebSocket response banner", change_ws_response),
         "10": ("⏻  Server restart / reboot", restart_or_reboot),
+        "11": ("◷  Daily VPS auto reboot", daily_auto_reboot),
+        "12": ("⌫  Delete all expired accounts", delete_expired_accounts),
     }
     while True:
         terminal_ui.option_cards(
@@ -280,7 +402,7 @@ def menu() -> None:
             columns=2, color=terminal_ui.YELLOW, colorful=True,
         )
         print(f"\n{terminal_ui.BLUE}Enter a card number to open | 0 returns to the dashboard{terminal_ui.RESET}")
-        choice = input("Select setting [0-10]: ").strip()
+        choice = input("Select setting [0-12]: ").strip()
         if choice == "0":
             return
         action = actions.get(choice)
