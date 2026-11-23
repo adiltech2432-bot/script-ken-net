@@ -264,38 +264,44 @@ class SettingsMenuTests(unittest.TestCase):
             self.assertEqual(banner.read_text(encoding="utf-8"), "Previous banner\n")
             self.assertEqual(config.read_text(encoding="utf-8"), "Banner /etc/issue.net\n")
 
-    def test_speed_test_runs_installed_cli_and_reports_failure(self):
-        completed = CompletedProcess([], 0, "Download: 100 Mbps", "")
-        version = CompletedProcess([], 0, "speedtest-cli 2.1.3", "")
-        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
-             patch.object(settings_manager.subprocess, "run", side_effect=[version, completed]) as run, \
+    def test_speed_test_uses_fast_com_and_reports_only_measured_download(self):
+        fast = "/usr/local/bin/fast"
+        completed = CompletedProcess(
+            [fast], 0,
+            "\x1b[2K | 947.20 Mbps\n\x1b[2K -> 949.98 Mbps\n", "")
+        with patch.object(settings_manager.shutil, "which",
+                          side_effect=lambda name: fast if name == "fast" else None), \
+             patch.object(settings_manager.subprocess, "run", return_value=completed) as run, \
              redirect_stdout(io.StringIO()) as output:
             settings_manager.speed_test()
-        self.assertEqual(run.call_args_list[-1].args[0], ["speedtest-cli", "--simple"])
-        self.assertIn("Measurement source: speedtest-cli", output.getvalue())
 
-        failed = CompletedProcess([], 2, "", "measurement failed")
-        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
-             patch.object(settings_manager.subprocess, "run", side_effect=[version, failed]), \
-             redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "measurement failed"):
+        run.assert_called_once_with([fast], capture_output=True, text=True, check=False, timeout=180)
+        self.assertIn("Measurement source: FAST.com", output.getvalue())
+        self.assertIn("Download: 949.98 Mbps", output.getvalue())
+        self.assertIn("Upload: not reported", output.getvalue())
+
+    def test_speed_test_reports_fast_com_execution_failure(self):
+        failed = CompletedProcess(["fast"], 2, "", "FAST.com connection failed")
+        with patch.object(settings_manager.shutil, "which", return_value="/usr/local/bin/fast"), \
+             patch.object(settings_manager.subprocess, "run", return_value=failed), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(RuntimeError, "FAST.com connection failed"):
             settings_manager.speed_test()
 
-    def test_speed_test_uses_ookla_acceptance_flags_only_for_ookla_cli(self):
-        version = CompletedProcess([], 0, "Speedtest by Ookla 1.2.0", "")
-        completed = CompletedProcess([], 0, "Download: 100 Mbps", "")
-        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest" if name == "speedtest" else None), \
-             patch.object(settings_manager.subprocess, "run", side_effect=[version, completed]) as run, \
-             redirect_stdout(io.StringIO()):
+    def test_speed_test_rejects_output_without_a_final_fast_com_measurement(self):
+        incomplete = CompletedProcess(["fast"], 0, "connecting to FAST.com...", "")
+        with patch.object(settings_manager.shutil, "which", return_value="/usr/local/bin/fast"), \
+             patch.object(settings_manager.subprocess, "run", return_value=incomplete), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(RuntimeError, "final download measurement"):
             settings_manager.speed_test()
-        self.assertEqual(run.call_args_list[-1].args[0],
-                         ["speedtest", "--accept-license", "--accept-gdpr"])
 
-    def test_speed_test_refuses_to_report_when_cli_version_cannot_be_verified(self):
-        version = CompletedProcess([], 1, "", "version probe failed")
-        with patch.object(settings_manager.shutil, "which", side_effect=lambda name: "speedtest-cli" if name == "speedtest-cli" else None), \
-             patch.object(settings_manager.subprocess, "run", return_value=version), \
-             self.assertRaisesRegex(RuntimeError, "version probe failed"):
+    def test_speed_test_does_not_silently_fall_back_when_fast_is_missing(self):
+        with patch.object(settings_manager.shutil, "which", return_value=None), \
+             patch.object(settings_manager.subprocess, "run") as run, \
+             self.assertRaisesRegex(RuntimeError, "FAST.com CLI is not installed"):
             settings_manager.speed_test()
+        run.assert_not_called()
 
     def test_daily_auto_reboot_writes_local_time_timer_and_enables_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:

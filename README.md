@@ -2,7 +2,7 @@
 
 An editable English terminal manager for Ubuntu 24.04. The default home screen is a keyboard-driven colored dashboard with live system metrics, domain, protocol status, listener ports, and account counts. The presentation layer opens the existing protocol managers, so account and service operations continue to use the same backend logic. Protocol numbers retain the original menu IDs even though the dashboard groups cards by service type.
 
-The **System settings** cards include running-service status, live TCP/UDP listener checks against the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing with multi-line UTF-8 input, a measured VPS speed test, confirmed VPS reboot, a configurable daily reboot timer in the server timezone (disabled until configured), and manual deletion of all expired managed accounts with per-protocol error reporting. The SSH banner accepts HTML source as text, but standard SSH clients display its tags literally rather than rendering HTML.
+The **System settings** cards include running-service status, live TCP/UDP listener checks against the port catalog, confirmed restart of active managed services, domain/certificate setup, DNSTT nameserver and per-endpoint key rotation, SSH banner editing with multi-line UTF-8 input, a live FAST.com download test, confirmed VPS reboot, a configurable daily reboot timer in the server timezone (disabled until configured), and manual deletion of all expired managed accounts with per-protocol error reporting. The SSH banner accepts HTML source as text, but standard SSH clients display its tags literally rather than rendering HTML. Speed testing uses the upstream `fast` CLI for Netflix Open Connect and does not silently switch to another provider; this CLI measurement reports download speed only.
 
 ## Managed features
 
@@ -19,6 +19,8 @@ The **System settings** cards include running-service status, live TCP/UDP liste
 The **Services / Ports** screen describes the implemented public ports and the listeners that share them. HAProxy/Nginx path and handshake routing is required because several protocols share TCP/80 and TCP/443.
 
 ## Important protocol limits
+
+- **FAST.com speed test:** option 8 requires the upstream `fast` CLI (`github.com/maaslalani/fast`). It measures download speed against Netflix Open Connect and reports the final Fast.com measurement; it does not report upload.
 
 - **UDP Custom** downloads the upstream ePro x86_64 binary. Its wire protocol is proprietary; use a compatible client. The broad UDP range is implemented with exclusions for DNSTT, OpenVPN and WireGuard.
 - **TLS** is a certificate transport used by Xray accounts, not a standalone account protocol.

@@ -37,6 +37,8 @@ WS_LOG_CARD_STYLES = {
     "3": ("\033[103m", "\033[30m"), "4": ("\033[104m", "\033[97m"),
     "5": ("\033[105m", "\033[30m"), "6": ("\033[107m", "\033[30m"),
 }
+FAST_DOWNLOAD_RE = re.compile(r"->\s*(?P<speed>\d+(?:\.\d+)?)\s*(?P<unit>Mbps|Gbps)\b", re.IGNORECASE)
+ANSI_CSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 AUTO_REBOOT_SERVICE = Path("/etc/systemd/system/kennet-auto-reboot.service")
 AUTO_REBOOT_TIMER = Path("/etc/systemd/system/kennet-auto-reboot.timer")
 
@@ -258,41 +260,28 @@ def change_banner() -> None:
 
 
 def speed_test() -> None:
-    command = shutil.which("speedtest") or shutil.which("speedtest-cli")
+    command = shutil.which("fast")
     if not command:
-        if input("speedtest-cli is not installed. Install it from Ubuntu packages now? Type YES: ").strip() != "YES":
-            print("Cancelled.")
-            return
-        import services_manager
-        services_manager.install_ubuntu_package("speedtest-cli")
-        command = shutil.which("speedtest-cli")
-        if not command:
-            raise RuntimeError("speedtest-cli package installed but its command was not found")
-    print("Running VPS speed test; this may take a minute...")
-    version = subprocess.run([command, "--version"], capture_output=True, text=True,
-                             check=False, timeout=10)
-    version_text = f"{version.stdout}\n{version.stderr}".casefold()
-    version_label = (version.stdout or version.stderr).strip().splitlines()
-    if version.returncode or not version_label:
-        raise RuntimeError(((version.stderr or version.stdout or
-                             "Could not verify the installed speed-test CLI version.")).strip())
-    args = [command]
-    if "ookla" in version_text:
-        args.extend(["--accept-license", "--accept-gdpr"])
-    else:
-        # Ubuntu's speedtest-cli package also installs a `speedtest` command.
-        # Detect the implementation instead of assuming that name means Ookla.
-        args.append("--simple")
-    result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
-    output = (result.stdout or result.stderr).strip()
+        raise RuntimeError(
+            "FAST.com CLI is not installed. Install the upstream Fast CLI from "
+            "github.com/maaslalani/fast; this option will not substitute a different speed-test service."
+        )
+    print("Running a live FAST.com download test against Netflix Open Connect...")
+    try:
+        result = subprocess.run([command], capture_output=True, text=True, check=False, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("FAST.com measurement timed out after 180 seconds.") from exc
+    output = ANSI_CSI_RE.sub("", f"{result.stdout or ''}\n{result.stderr or ''}").replace("\r", "\n")
     if result.returncode:
-        raise RuntimeError((output or
-                            f"Speed test exited with status {result.returncode}.").strip())
-    if not output:
-        raise RuntimeError("The speed test command returned no measurement output; check the installed CLI.")
-    print(f"Measurement source: {Path(command).name} ({version_label[0]})")
-    print("Measured VPS network results:")
-    print(output)
+        detail = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
+        raise RuntimeError(detail or f"FAST.com measurement exited with status {result.returncode}.")
+    measurements = list(FAST_DOWNLOAD_RE.finditer(output))
+    if not measurements:
+        raise RuntimeError("FAST.com CLI returned no final download measurement.")
+    measurement = measurements[-1]
+    print("Measurement source: FAST.com (Netflix Open Connect)")
+    print(f"Download: {measurement.group('speed')} {measurement.group('unit')}")
+    print("Upload: not reported by the installed FAST.com CLI.")
 
 
 def restart_or_reboot() -> None:
@@ -459,7 +448,7 @@ def menu() -> None:
         "5": ("⌁  Change DNSTT nameserver", change_nameserver),
         "6": ("⚿  Rotate DNSTT keys", rotate_dnstt_keys),
         "7": ("▣  Change SSH banner (text / HTML)", change_banner),
-        "8": ("↗  VPS network speed test", speed_test),
+        "8": ("↗  FAST.com speed test", speed_test),
         "10": ("⏻  Server restart / reboot", restart_or_reboot),
         "11": ("◷  Daily VPS auto reboot", daily_auto_reboot),
         "12": ("⌫  Delete all expired accounts", delete_expired_accounts),
