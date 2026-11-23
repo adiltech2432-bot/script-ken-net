@@ -70,7 +70,6 @@ class SettingsMenuTests(unittest.TestCase):
             "settings_manager.rotate_dnstt_keys": "6",
             "settings_manager.change_banner": "7",
             "settings_manager.speed_test": "8",
-            "settings_manager.change_ws_response": "9",
             "settings_manager.restart_or_reboot": "10",
             "settings_manager.daily_auto_reboot": "11",
             "settings_manager.delete_expired_accounts": "12",
@@ -88,11 +87,37 @@ class SettingsMenuTests(unittest.TestCase):
 
         for action in mockers.values():
             action.assert_called_once()
-        self.assertEqual(cards.call_count, 13)
+        self.assertEqual(cards.call_count, 12)
         first_options = cards.call_args_list[0].args[1]
         self.assertTrue(cards.call_args_list[0].kwargs["colorful"])
-        self.assertIn(("9", "≋  WebSocket response banner"), first_options)
+        self.assertNotIn("9", [key for key, _label in first_options])
         self.assertIn(("0", "←  Back to dashboard"), first_options)
+
+    def test_system_settings_menu_hides_websocket_response_option_nine(self):
+        with patch.object(settings_manager.os, "geteuid", return_value=0, create=True), \
+             patch.object(terminal_ui, "option_cards") as cards, \
+             patch.object(terminal_ui, "heading"), \
+             patch("builtins.input", return_value="0"):
+            settings_manager.menu()
+
+        first_options = cards.call_args.args[1]
+        self.assertNotIn("9", [key for key, _label in first_options])
+
+    def test_ssh_banner_accepts_multiline_html_and_unicode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            banner = Path(temp_dir) / "issue.net"
+            config = Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"
+            message = '<font color="#00E676"><b>Premium Server</b></font><br>\n⚡ WELCOME TO KEN-NET VPS 2026 🇮🇹'
+            with patch.object(settings_manager, "SSH_BANNER", banner), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG", config), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {banner}\n", "")), \
+                 patch.object(settings_manager, "_run"), \
+                 patch("builtins.input", side_effect=[message.splitlines()[0], message.splitlines()[1], "END"]):
+                settings_manager.change_banner()
+
+            self.assertEqual(banner.read_text(encoding="utf-8"), message + "\n")
+            self.assertEqual(config.read_text(encoding="utf-8"), f"Banner {banner}\n")
 
     def test_root_requirement_exits_before_showing_settings(self):
         output = io.StringIO()
@@ -212,7 +237,7 @@ class SettingsMenuTests(unittest.TestCase):
                  patch.object(settings_manager.subprocess, "run",
                               return_value=CompletedProcess([], 0, f"banner {banner}\n", "")), \
                  patch.object(settings_manager, "_run") as run, \
-                 patch("builtins.input", return_value="Welcome to KEN-NET"):
+                 patch("builtins.input", side_effect=["Welcome to KEN-NET", "END"]):
                 settings_manager.change_banner()
 
             self.assertEqual(banner.read_text(encoding="utf-8"), "Welcome to KEN-NET\n")
@@ -232,7 +257,7 @@ class SettingsMenuTests(unittest.TestCase):
                  patch.object(settings_manager, "SSH_BANNER_CONFIG", config), \
                  patch.object(settings_manager.subprocess, "run", side_effect=[invalid, CompletedProcess([], 0, "", "")]), \
                  patch.object(settings_manager, "_run"), \
-                 patch("builtins.input", return_value="New banner"), \
+                 patch("builtins.input", side_effect=["New banner", "END"]), \
                  self.assertRaisesRegex(RuntimeError, "bad sshd configuration"):
                 settings_manager.change_banner()
 

@@ -23,6 +23,7 @@ RESTART_UNITS = (
 )
 SSH_BANNER = Path("/etc/issue.net")
 SSH_BANNER_CONFIG = Path("/etc/ssh/sshd_config.d/99-kennet-banner.conf")
+MAX_SSH_BANNER_BYTES = 32 * 1024
 WS_RESPONSE_CONFIG = Path("/etc/kennet-panel/websocket-response.json")
 DEFAULT_WS_RESPONSE_BANNER = "KEN-NET"
 WS_RESPONSE_BANNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$")
@@ -227,9 +228,33 @@ def rotate_dnstt_keys() -> None:
 
 
 def change_banner() -> None:
-    message = input("New SSH login banner (single line; blank clears it): ").strip()
+    print("Paste the SSH banner below. HTML is accepted as text; standard SSH clients show its tags literally.")
+    print("Submit an empty first line to clear the banner. Finish a multi-line banner with END on its own line.")
+    first_line = input("Banner: ")
+    first_line_size = len(first_line.encode("utf-8"))
+    too_large = first_line_size > MAX_SSH_BANNER_BYTES
+    has_content = first_line != ""
+    lines = [first_line] if first_line and not too_large else []
+    banner_size = first_line_size
+    if has_content:
+        while True:
+            line = input()
+            if line == "END":
+                break
+            if not too_large:
+                banner_size += 1 + len(line.encode("utf-8"))
+                if banner_size > MAX_SSH_BANNER_BYTES:
+                    too_large = True
+                    lines.clear()
+                else:
+                    lines.append(line)
+    if too_large:
+        raise ValueError(f"SSH banner exceeds the {MAX_SSH_BANNER_BYTES // 1024} KiB limit.")
+    message = "\n".join(lines)
+    if any((ord(char) < 0x20 and char not in "\n\t") or ord(char) == 0x7F for char in message):
+        raise ValueError("SSH banners may contain line breaks and tabs, but not terminal control characters.")
     _set_ssh_login_banner(message)
-    print("SSH login banner updated.")
+    print("SSH login banner updated. New SSH connections will receive the saved text.")
 
 
 def speed_test() -> None:
@@ -433,9 +458,8 @@ def menu() -> None:
         "4": ("◎  Change server domain", change_domain),
         "5": ("⌁  Change DNSTT nameserver", change_nameserver),
         "6": ("⚿  Rotate DNSTT keys", rotate_dnstt_keys),
-        "7": ("▣  Change SSH banner", change_banner),
+        "7": ("▣  Change SSH banner (text / HTML)", change_banner),
         "8": ("↗  VPS network speed test", speed_test),
-        "9": ("≋  WebSocket response banner", change_ws_response),
         "10": ("⏻  Server restart / reboot", restart_or_reboot),
         "11": ("◷  Daily VPS auto reboot", daily_auto_reboot),
         "12": ("⌫  Delete all expired accounts", delete_expired_accounts),
@@ -447,7 +471,7 @@ def menu() -> None:
             columns=2, color=terminal_ui.YELLOW, colorful=True,
         )
         print(f"\n{terminal_ui.BLUE}Enter a card number to open | 0 returns to the dashboard{terminal_ui.RESET}")
-        choice = input("Select setting [0-12]: ").strip()
+        choice = input("Select setting [0-8, 10-12]: ").strip()
         if choice == "0":
             return
         action = actions.get(choice)
