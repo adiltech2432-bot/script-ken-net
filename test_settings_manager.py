@@ -9,6 +9,7 @@ import unittest
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import dnstt_manager
@@ -20,6 +21,45 @@ import websocket_tunnel
 
 
 class SettingsMenuTests(unittest.TestCase):
+    def test_log_color_picker_cards_are_filled_with_their_matching_color(self):
+        options = [(key, f"{name.title()} log")
+                   for key, (name, _ansi) in settings_manager.WS_LOG_COLORS.items()]
+        output = io.StringIO()
+        with patch.object(terminal_ui, "clear_screen"), \
+             patch.object(terminal_ui, "heading"), \
+             patch.object(terminal_ui.shutil, "get_terminal_size",
+                          return_value=SimpleNamespace(columns=80)), \
+             redirect_stdout(output):
+            terminal_ui.option_cards("WEBSOCKET HANDSHAKE LOG COLOR", options, columns=3,
+                                     card_styles=settings_manager.WS_LOG_CARD_STYLES)
+
+        rendered = output.getvalue()
+        for key, (name, _ansi) in settings_manager.WS_LOG_COLORS.items():
+            background, foreground = settings_manager.WS_LOG_CARD_STYLES[key]
+            self.assertGreaterEqual(rendered.count(background + foreground), 3)
+            self.assertIn(f"[{key}] {name.title()} log", rendered)
+
+    def test_websocket_log_color_setting_passes_matching_filled_card_styles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            issue = Path(temp_dir) / "issue.net"
+            with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(settings_manager, "SSH_BANNER", issue), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG",
+                              Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {issue}\n", "")), \
+                 patch.object(settings_manager, "_run"), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch.object(terminal_ui, "option_cards") as cards, \
+                 patch("builtins.input", side_effect=["", "4"]):
+                settings_manager.change_ws_response()
+
+            self.assertEqual(cards.call_args.kwargs["card_styles"], settings_manager.WS_LOG_CARD_STYLES)
+            self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
+                             {"banner": "KEN-NET", "log_color": "blue"})
+
     def test_all_numbered_cards_dispatch_to_their_action_and_zero_returns(self):
         action_paths = {
             "panel.show_status": "1",
@@ -169,7 +209,8 @@ class SettingsMenuTests(unittest.TestCase):
             config = Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"
             with patch.object(settings_manager, "SSH_BANNER", banner), \
                  patch.object(settings_manager, "SSH_BANNER_CONFIG", config), \
-                 patch.object(settings_manager.subprocess, "run", return_value=CompletedProcess([], 0, "", "")), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {banner}\n", "")), \
                  patch.object(settings_manager, "_run") as run, \
                  patch("builtins.input", return_value="Welcome to KEN-NET"):
                 settings_manager.change_banner()
@@ -306,8 +347,15 @@ class SettingsMenuTests(unittest.TestCase):
     def test_websocket_response_setting_is_safe_and_applies_to_next_handshake(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "websocket-response.json"
+            issue = Path(temp_dir) / "issue.net"
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(settings_manager, "SSH_BANNER", issue), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG",
+                              Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {issue}\n", "")), \
+                 patch.object(settings_manager, "_run"), \
                  patch.object(terminal_ui, "detail_card"), \
                  patch.object(terminal_ui, "option_cards"), \
                  patch("builtins.input", side_effect=["KEN-NET Gateway 2", "2"]):
@@ -319,11 +367,69 @@ class SettingsMenuTests(unittest.TestCase):
                 self.assertIn(b"X-KEN-NET-Banner: KEN-NET Gateway 2", response)
                 self.assertIn(b"Sec-WebSocket-Accept: accept-token", response)
 
+    def test_websocket_response_banner_is_mirrored_to_ssh_login_banner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            issue = Path(temp_dir) / "issue.net"
+            sshd_config = Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"
+            with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(settings_manager, "SSH_BANNER", issue), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG", sshd_config), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {issue}\n", "")), \
+                 patch.object(settings_manager, "_run") as run, \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch.object(terminal_ui, "option_cards"), \
+                 patch("builtins.input", side_effect=["HTTP Custom greeting", "2"]):
+                settings_manager.change_ws_response()
+
+            self.assertEqual(issue.read_text(encoding="utf-8"), "HTTP Custom greeting\n")
+            self.assertEqual(sshd_config.read_text(encoding="utf-8"), f"Banner {issue}\n")
+            run.assert_called_once_with(["systemctl", "reload", "ssh"])
+
+    def test_websocket_response_save_failure_rolls_back_ssh_banner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "websocket-response.json"
+            issue = Path(temp_dir) / "issue.net"
+            sshd_config = Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"
+            write_text = settings_manager._atomic_text
+
+            def fail_response_config(path, content, mode=0o644):
+                if path == config:
+                    raise OSError("response config is read-only")
+                write_text(path, content, mode)
+
+            with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(settings_manager, "SSH_BANNER", issue), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG", sshd_config), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {issue}\n", "")), \
+                 patch.object(settings_manager, "_run"), \
+                 patch.object(terminal_ui, "detail_card"), \
+                 patch.object(terminal_ui, "option_cards"), \
+                 patch.object(settings_manager, "_atomic_text", side_effect=fail_response_config), \
+                 patch("builtins.input", side_effect=["temporary greeting", "2"]), \
+                 self.assertRaisesRegex(OSError, "response config is read-only"):
+                settings_manager.change_ws_response()
+
+            self.assertFalse(issue.exists())
+            self.assertFalse(sshd_config.exists())
+            self.assertFalse(config.exists())
+
     def test_websocket_response_normalizes_visually_equivalent_space_and_hyphen(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "websocket-response.json"
+            issue = Path(temp_dir) / "issue.net"
             with patch.object(settings_manager, "WS_RESPONSE_CONFIG", config), \
                  patch.object(websocket_tunnel, "WS_RESPONSE_CONFIG", config), \
+                 patch.object(settings_manager, "SSH_BANNER", issue), \
+                 patch.object(settings_manager, "SSH_BANNER_CONFIG",
+                              Path(temp_dir) / "sshd_config.d" / "99-kennet-banner.conf"), \
+                 patch.object(settings_manager.subprocess, "run",
+                              return_value=CompletedProcess([], 0, f"banner {issue}\n", "")), \
+                 patch.object(settings_manager, "_run"), \
                  patch.object(terminal_ui, "detail_card"), \
                  patch.object(terminal_ui, "option_cards"), \
                  patch("builtins.input", side_effect=["BY\u00a0KEN\u2011NET", ""]):

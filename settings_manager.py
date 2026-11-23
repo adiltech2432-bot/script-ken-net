@@ -31,6 +31,11 @@ WS_LOG_COLORS = {
     "3": ("yellow", "\033[93m"), "4": ("blue", "\033[94m"),
     "5": ("magenta", "\033[95m"), "6": ("white", "\033[97m"),
 }
+WS_LOG_CARD_STYLES = {
+    "1": ("\033[102m", "\033[30m"), "2": ("\033[106m", "\033[30m"),
+    "3": ("\033[103m", "\033[30m"), "4": ("\033[104m", "\033[97m"),
+    "5": ("\033[105m", "\033[30m"), "6": ("\033[107m", "\033[30m"),
+}
 AUTO_REBOOT_SERVICE = Path("/etc/systemd/system/kennet-auto-reboot.service")
 AUTO_REBOOT_TIMER = Path("/etc/systemd/system/kennet-auto-reboot.timer")
 
@@ -55,6 +60,59 @@ def _atomic_text(path: Path, content: str, mode: int = 0o644) -> None:
     except Exception:
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+def _optional_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def _restore_optional_text(path: Path, content: str | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        _atomic_text(path, content)
+
+
+def _set_ssh_login_banner(message: str) -> tuple[str | None, str | None, bool]:
+    """Apply and verify the SSH pre-auth banner, restoring old files on failure."""
+    content = message + "\n" if message else ""
+    config = f"Banner {SSH_BANNER}\n"
+    previous_banner = _optional_text(SSH_BANNER)
+    previous_config = _optional_text(SSH_BANNER_CONFIG)
+    changed = previous_banner != content or previous_config != config
+
+    try:
+        _atomic_text(SSH_BANNER, content)
+        _atomic_text(SSH_BANNER_CONFIG, config)
+        check = subprocess.run(["sshd", "-t"], capture_output=True, text=True, check=False)
+        if check.returncode:
+            raise RuntimeError((check.stderr or check.stdout or "OpenSSH configuration validation failed.").strip())
+        effective = subprocess.run(["sshd", "-T"], capture_output=True, text=True, check=False)
+        if effective.returncode:
+            raise RuntimeError((effective.stderr or effective.stdout or "Could not read effective OpenSSH configuration.").strip())
+        banner_line = next((line.strip() for line in effective.stdout.splitlines()
+                            if line.strip().lower().startswith("banner ")), "")
+        if banner_line.casefold() != f"banner {SSH_BANNER}".casefold():
+            raise RuntimeError("OpenSSH did not load the KEN-NET login banner setting.")
+        if changed:
+            _run(["systemctl", "reload", "ssh"])
+    except Exception as error:
+        try:
+            _restore_optional_text(SSH_BANNER, previous_banner)
+            _restore_optional_text(SSH_BANNER_CONFIG, previous_config)
+            subprocess.run(["systemctl", "reload", "ssh"], capture_output=True, check=False)
+        except Exception as rollback_error:
+            raise RuntimeError(f"{error}; restoring the previous SSH banner also failed: {rollback_error}") from error
+        raise
+    return previous_banner, previous_config, changed
+
+
+def _restore_ssh_login_banner(snapshot: tuple[str | None, str | None, bool]) -> None:
+    previous_banner, previous_config, changed = snapshot
+    _restore_optional_text(SSH_BANNER, previous_banner)
+    _restore_optional_text(SSH_BANNER_CONFIG, previous_config)
+    if changed:
+        _run(["systemctl", "reload", "ssh"])
 
 
 def restart_services() -> None:
@@ -170,25 +228,7 @@ def rotate_dnstt_keys() -> None:
 
 def change_banner() -> None:
     message = input("New SSH login banner (single line; blank clears it): ").strip()
-    content = (message + "\n") if message else ""
-    previous_banner = SSH_BANNER.read_text(encoding="utf-8") if SSH_BANNER.exists() else None
-    previous_config = SSH_BANNER_CONFIG.read_text(encoding="utf-8") if SSH_BANNER_CONFIG.exists() else None
-    SSH_BANNER.parent.mkdir(parents=True, exist_ok=True)
-    SSH_BANNER.write_text(content, encoding="utf-8")
-    SSH_BANNER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    SSH_BANNER_CONFIG.write_text(f"Banner {SSH_BANNER}\n", encoding="utf-8")
-    check = subprocess.run(["sshd", "-t"], capture_output=True, text=True, check=False)
-    try:
-        if check.returncode:
-            raise RuntimeError((check.stderr or check.stdout).strip())
-        _run(["systemctl", "reload", "ssh"])
-    except Exception:
-        if previous_banner is None: SSH_BANNER.unlink(missing_ok=True)
-        else: SSH_BANNER.write_text(previous_banner, encoding="utf-8")
-        if previous_config is None: SSH_BANNER_CONFIG.unlink(missing_ok=True)
-        else: SSH_BANNER_CONFIG.write_text(previous_config, encoding="utf-8")
-        subprocess.run(["systemctl", "reload", "ssh"], capture_output=True, check=False)
-        raise
+    _set_ssh_login_banner(message)
     print("SSH login banner updated.")
 
 
@@ -252,7 +292,7 @@ def change_ws_response() -> None:
         ("Required handshake", "101 Switching Protocols"),
         ("Current KEN-NET banner", current),
         ("Handshake log color", current_color.upper()),
-    ], note="The HTTP header stays plain ASCII. The selected color applies to successful WebSocket 101 entries in the systemd service log and takes effect immediately.", color=terminal_ui.BLUE)
+    ], note="The response text is also used as the OpenSSH pre-login banner shown by clients such as HTTP Custom as Server Message. It applies to all SSH logins. The selected color affects successful WebSocket 101 entries in the systemd service log.", color=terminal_ui.BLUE)
     value = input("New response banner [Enter keeps current; DEFAULT resets]: ")
     value = unicodedata.normalize("NFKC", value)
     value = "".join("-" if unicodedata.category(char) == "Pd" or char == "\u2212" else char
@@ -271,7 +311,7 @@ def change_ws_response() -> None:
         raise ValueError("Use 1–64 letters, numbers, spaces, dots, underscores, slashes, or hyphens." + detail)
     choices = [(key, f"{name.title()} log") for key, (name, _ansi) in WS_LOG_COLORS.items()]
     terminal_ui.option_cards("WEBSOCKET HANDSHAKE LOG COLOR", choices, columns=3,
-                             color=terminal_ui.BLUE, colorful=True)
+                             color=terminal_ui.BLUE, card_styles=WS_LOG_CARD_STYLES)
     selected = input(f"Log color [1-6; Enter keeps {current_color}]: ").strip()
     if not selected:
         color_name = current_color
@@ -283,13 +323,18 @@ def change_ws_response() -> None:
             color_name = selected.casefold()
         else:
             raise ValueError("Choose a WebSocket log color from 1 to 6, or press Enter to keep the current color.")
-    if value == current and color_name == current_color:
+    ssh_snapshot = _set_ssh_login_banner(value)
+    if value == current and color_name == current_color and not ssh_snapshot[2]:
         print("No change made.")
         return
-    _atomic_text(WS_RESPONSE_CONFIG, json.dumps({"banner": value, "log_color": color_name}) + "\n")
+    try:
+        _atomic_text(WS_RESPONSE_CONFIG, json.dumps({"banner": value, "log_color": color_name}) + "\n")
+    except Exception:
+        _restore_ssh_login_banner(ssh_snapshot)
+        raise
     ansi = next(code for name, code in WS_LOG_COLORS.values() if name == color_name)
     print(f"{ansi}WebSocket handshake log preview: {value}\033[0m")
-    print("The response header remains plain ASCII; the log color applies to new successful handshakes immediately.")
+    print("The response text is active in the SSH login banner; new SSH logins will display it. WebSocket log color applies immediately.")
 
 
 def _server_timezone() -> str:
